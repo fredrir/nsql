@@ -97,6 +97,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
 
     let mut cmd = Command::new("nvim");
     cmd.env("NSQL_STATUS", editor::status_line(profile))
+        .env_remove("PGPASSWORD") // don't leak a secret into the editor's env
         .arg("--embed")
         .arg("-n")
         .arg("-i")

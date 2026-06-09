@@ -120,20 +120,88 @@ fn rand_token() -> String {
     format!("{}{nanos:08x}", std::process::id())
 }
 
+/// Decompose `scheme://user:pass@host:port/path` into (head, user, password,
+/// host_and_path). Uses the LAST `@` in the *authority* (before the path) so a
+/// password that itself contains `@` is handled correctly.
+fn split_url(url: &str) -> Option<(&str, &str, Option<&str>, String)> {
+    let i = url.find("://")?;
+    let (head, rest) = url.split_at(i + 3);
+    let auth_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(auth_end);
+    let at = authority.rfind('@')?;
+    let (userinfo, hostat) = authority.split_at(at); // hostat = "@host:port"
+    let (user, password) = match userinfo.find(':') {
+        Some(c) => (&userinfo[..c], Some(&userinfo[c + 1..])),
+        None => (userinfo, None),
+    };
+    Some((head, user, password, format!("{hostat}{path}")))
+}
+
 /// Mask the password in a connection URL so it never lands in scrollback, logs,
 /// or error messages. `scheme://user:secret@host` -> `scheme://user:***@host`.
 pub fn redact_url(url: &str) -> String {
-    if let Some(i) = url.find("://") {
-        let (head, rest) = url.split_at(i + 3);
-        if let Some(at) = rest.find('@') {
-            let creds = &rest[..at];
-            let after = &rest[at..];
-            if let Some(colon) = creds.find(':') {
-                return format!("{head}{}:***{after}", &creds[..colon]);
+    match split_url(url) {
+        Some((head, user, Some(_), hostpath)) => format!("{head}{user}:***{hostpath}"),
+        _ => url.to_string(),
+    }
+}
+
+/// Remove the password from a connection URL for *storage* (keeps the username).
+/// `scheme://user:secret@host` -> `scheme://user@host`. NOTE: distinct from
+/// `redact_url`, which substitutes `***` for *display* — never use that for
+/// storage or it would write a literal `***` password.
+pub fn strip_url_password(url: &str) -> String {
+    match split_url(url) {
+        Some((head, user, Some(_), hostpath)) => format!("{head}{user}{hostpath}"),
+        _ => url.to_string(),
+    }
+}
+
+/// The password embedded in a connection URL, if any (used to migrate it into
+/// the keyring at `connect` time so it never persists in config.toml).
+pub fn url_password(url: &str) -> Option<String> {
+    match split_url(url) {
+        Some((_, _, Some(pw), _)) if !pw.is_empty() => Some(pw.to_string()),
+        _ => None,
+    }
+}
+
+/// Atomically write a file readable only by the owner (0600), closing the
+/// write-then-chmod TOCTOU window: write to an O_EXCL 0600 temp in the same
+/// directory, then rename over the target.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("nsql");
+    for _ in 0..16 {
+        let tmp = dir.join(format!(".{name}.{}.tmp", rand_token()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+        {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                f.sync_all().ok();
+                drop(f);
+                std::fs::rename(&tmp, path)?;
+                return Ok(());
             }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
         }
     }
-    url.to_string()
+    bail!("could not create a temp file next to {}", path.display())
+}
+
+/// Best-effort: tighten a directory to owner-only (0700).
+pub fn chmod_private_dir(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
 }
 
 /// (columns, rows) of the terminal, with a sane fallback when not a tty.
@@ -157,6 +225,16 @@ mod tests {
         // no password -> unchanged
         assert_eq!(redact_url("sqlite:///x/y.db"), "sqlite:///x/y.db");
         assert_eq!(redact_url("postgres://joe@host/db"), "postgres://joe@host/db");
+    }
+
+    #[test]
+    fn password_with_at_sign_does_not_leak() {
+        // A password containing '@' must be fully masked/stripped (uses the LAST
+        // '@' in the authority, not the first).
+        let u = "postgres://joe:p@ss@db.host:5432/app";
+        assert_eq!(redact_url(u), "postgres://joe:***@db.host:5432/app");
+        assert_eq!(strip_url_password(u), "postgres://joe@db.host:5432/app");
+        assert_eq!(url_password(u).as_deref(), Some("p@ss"));
     }
 
     #[test]

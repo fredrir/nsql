@@ -26,8 +26,9 @@ cargo test                       # includes the "never emit alt-screen" invarian
 echo "select 'hi' as greeting" | ./target/debug/nsql
 ./target/debug/nsql --json -e "select 1 as a"   | jq
 
-# connect ad-hoc to any database by URL (no profile needed)
+# connect by URL once — then bare `nsql` resumes it next time (no URL in hand)
 ./target/debug/nsql postgres://user:pass@localhost:5432/mydb
+./target/debug/nsql                # resumes the last connection
 ./target/debug/nsql "sqlite:///tmp/scratch.db" -e "select 1"
 
 # the main event: a persistent inline session in your real neovim
@@ -111,7 +112,9 @@ back to Mode 1 automatically when there's no terminal (e.g. `--edit` while pipin
 | `nsql --classic` | use the classic transient-child editor (Mode 1) instead |
 | `nsql --edit` | force the editor even when piping |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |
-| `nsql postgres://…` | connect ad-hoc to a URL (unsaved, one-off) |
+| `nsql` | resume the **last connection** you used (no URL needed) |
+| `nsql postgres://…` | connect to a URL (remembered for next time) |
+| `nsql <label>` / `nsql <n>` | reconnect to a recent connection by name or index |
 | `nsql @prod ...` / `-p prod` | pick a saved connection profile |
 | `nsql -x` / `--json` / `--format csv\|tsv\|table` | output modes |
 | `nsql --all` | don't cap rows (default cap: 1000) |
@@ -173,7 +176,9 @@ readonly = true
 - **SQLite** — bundled (no system lib), full type fidelity.
 - **Postgres** — via the sync `postgres` crate using the *simple-query protocol*,
   so values render exactly like `psql` and NULL stays distinct from empty.
-  Password resolution when the URL omits it: `PGPASSWORD` env → OS keyring.
+  Password resolution when the URL omits it: `PGPASSWORD` env → `~/.pgpass` →
+  OS keyring (keyed on `user@host:port/db`). Remembered connections store the URL
+  **without** the password.
   Caveat: simple-query returns every value as **text**, so `--json` emits numbers
   as strings (`"42"`); typed/binary mode and TLS/SSL are Phase 3.
 - **MySQL** — stubbed (next behind the dispatch in `src/db.rs`).

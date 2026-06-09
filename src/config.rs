@@ -16,6 +16,7 @@ pub struct Paths {
     pub history_db: PathBuf,
     pub inject_lua: PathBuf,
     pub default_db: PathBuf,
+    pub recents_file: PathBuf,
 }
 
 impl Paths {
@@ -31,12 +32,18 @@ impl Paths {
         std::fs::create_dir_all(&data_dir).ok();
         std::fs::create_dir_all(&state_dir).ok();
         std::fs::create_dir_all(&favorites_dir).ok();
+        // Keep all of nsql's dirs owner-only: they hold connection inventories,
+        // query history (may contain literal secrets), scratch, and recents.
+        for d in [&config_dir, &data_dir, &state_dir, &favorites_dir] {
+            crate::util::chmod_private_dir(d);
+        }
 
         Ok(Self {
             config_file: config_dir.join("config.toml"),
             history_db: data_dir.join("history.sqlite"),
             inject_lua: data_dir.join("inject.lua"),
             default_db: data_dir.join("dev.db"),
+            recents_file: state_dir.join("recents.toml"),
             favorites_dir,
             state_dir,
         })
@@ -115,7 +122,7 @@ impl Config {
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
         let text = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&paths.config_file, text)
+        crate::util::write_private(&paths.config_file, text.as_bytes())
             .with_context(|| format!("writing {}", paths.config_file.display()))?;
         Ok(())
     }

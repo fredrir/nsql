@@ -4,6 +4,7 @@
 mod backends;
 mod cli;
 mod config;
+mod creds;
 mod db;
 mod editor;
 #[cfg(feature = "embed-editor")]
@@ -11,6 +12,7 @@ mod embed;
 mod favorites;
 mod history;
 mod pager;
+mod recents;
 mod render;
 mod secrets;
 mod util;
@@ -40,9 +42,9 @@ fn real_main() -> Result<()> {
         _ => true,
     });
 
-    // A bare connection URL (`nsql postgres://…`) is an ad-hoc, unsaved
-    // connection — pull it out before clap so it isn't read as a subcommand.
-    let adhoc_url = extract_adhoc_url(&mut argv);
+    // A leading positional (`nsql postgres://…`, `nsql staging`, `nsql 2`) is a
+    // connection target — pull it out before clap so it isn't read as a subcommand.
+    let target = extract_target(&mut argv);
 
     let cli = Cli::parse_from(argv);
     let profile_override = profile_at.or_else(|| cli.profile.clone());
@@ -54,16 +56,45 @@ fn real_main() -> Result<()> {
         return run_subcommand(cmd, &paths, &mut cfg, profile_override.as_deref());
     }
 
-    let profile = match &adhoc_url {
-        Some(url) => Profile {
-            name: adhoc_name(url),
-            url: url.clone(),
-            prod: false,
-            readonly: false,
-            no_history: false,
-        },
-        None => cfg.select(profile_override.as_deref())?,
+    // Resolve the connection: explicit target (URL / recents label / index / saved
+    // profile) > -p/@name > resume the most-recent > the bootstrapped `local`.
+    let profile = if let Some(t) = &target {
+        if is_db_url(t) {
+            Profile {
+                name: adhoc_name(t),
+                url: t.clone(),
+                prod: false,
+                readonly: false,
+                no_history: false,
+            }
+        } else if let Some(r) = recents::resolve(&paths, t) {
+            r.to_profile(&cfg)
+        } else if let Some(p) = cfg.profiles.iter().find(|p| &p.name == t).cloned() {
+            p
+        } else {
+            anyhow::bail!(
+                "unknown connection `{t}` — pass a URL, a saved profile (`nsql profiles`), \
+                 or a recents label/number"
+            );
+        }
+    } else if let Some(name) = &profile_override {
+        cfg.select(Some(name))?
+    } else {
+        match recents::most_recent(&paths) {
+            Some(r) => r.to_profile(&cfg),
+            None => cfg.select(None)?,
+        }
     };
+
+    // Remember interactively-chosen connections so bare `nsql` resumes them. Skip
+    // scripted one-shots (`-e`/`-f`/stdin pipes) so scripts don't pin connections.
+    let scripted =
+        cli.execute.is_some() || cli.file.is_some() || cli.favorite.is_some() || !std::io::stdin().is_terminal();
+    if target.is_some() || !scripted {
+        let saved = cfg.profiles.iter().any(|p| p.name == profile.name);
+        recents::record(&paths, &profile, saved);
+    }
+
     let out_tty = std::io::stdout().is_terminal();
 
     // Acquire what to do. The interactive embed session runs queries itself and
@@ -146,11 +177,16 @@ fn is_db_url(s: &str) -> bool {
     )
 }
 
-/// Pull a leading bare connection URL out of argv (the first positional token, so
-/// it never swallows an option value like `connect --url …`). Returns the URL.
-fn extract_adhoc_url(argv: &mut Vec<String>) -> Option<String> {
+/// Pull a leading connection target out of argv — the first positional token (so
+/// it never swallows an option value like `connect --url …`). Returns it unless
+/// it's a subcommand name, which is left for clap. The target may be a URL, a
+/// recents label, a recents index, or a saved-profile name.
+fn extract_target(argv: &mut Vec<String>) -> Option<String> {
     const VALUE_FLAGS: &[&str] = &[
         "-e", "--execute", "-f", "--file", "-F", "--favorite", "-p", "--profile", "--format",
+    ];
+    const SUBCOMMANDS: &[&str] = &[
+        "profiles", "connect", "save", "favorites", "history", "discover", "help",
     ];
     let mut i = 1;
     let mut skip_value = false;
@@ -171,12 +207,11 @@ fn extract_adhoc_url(argv: &mut Vec<String>) -> Option<String> {
             i += 1;
             continue;
         }
-        // First positional token: take it only if it's a URL, else leave it
-        // (it's a subcommand or other arg) and stop scanning.
-        return if is_db_url(a) {
-            Some(argv.remove(i))
-        } else {
+        // First positional: leave subcommands for clap; otherwise it's a target.
+        return if SUBCOMMANDS.contains(&a.as_str()) {
             None
+        } else {
+            Some(argv.remove(i))
         };
     }
     None
@@ -207,29 +242,35 @@ mod tests {
     fn extracts_leading_url() {
         let mut a = argv(&["postgres://u:p@h/db", "-e", "select 1"]);
         assert_eq!(
-            extract_adhoc_url(&mut a).as_deref(),
+            extract_target(&mut a).as_deref(),
             Some("postgres://u:p@h/db")
         );
         assert_eq!(a, argv(&["-e", "select 1"]));
     }
 
     #[test]
-    fn does_not_steal_connect_url() {
+    fn extracts_label_and_index_targets() {
+        // A bare non-URL positional is a recents label / index, now extracted.
+        let mut a = argv(&["staging"]);
+        assert_eq!(extract_target(&mut a).as_deref(), Some("staging"));
+        let mut b = argv(&["2"]);
+        assert_eq!(extract_target(&mut b).as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn does_not_steal_connect_url_or_subcommands() {
         // The URL here is the value of `--url`, not a bare positional.
         let mut a = argv(&["connect", "prod", "--url", "postgres://u@h/db"]);
-        assert_eq!(extract_adhoc_url(&mut a), None);
+        assert_eq!(extract_target(&mut a), None);
+        // Subcommands are left for clap.
+        let mut b = argv(&["profiles"]);
+        assert_eq!(extract_target(&mut b), None);
     }
 
     #[test]
-    fn ignores_non_url_positional() {
-        let mut a = argv(&["profiles"]);
-        assert_eq!(extract_adhoc_url(&mut a), None);
-    }
-
-    #[test]
-    fn url_after_value_flag() {
+    fn target_after_value_flag() {
         let mut a = argv(&["-p", "x", "sqlite:///t.db"]);
-        assert_eq!(extract_adhoc_url(&mut a).as_deref(), Some("sqlite:///t.db"));
+        assert_eq!(extract_target(&mut a).as_deref(), Some("sqlite:///t.db"));
     }
 
     #[test]
@@ -318,25 +359,41 @@ fn run_subcommand(
             readonly,
         } => {
             let existing = cfg.profiles.iter().find(|p| p.name == name).cloned();
-            let url = url
+            let raw_url = url
                 .or_else(|| existing.as_ref().map(|p| p.url.clone()))
                 .context("a new profile needs --url (e.g. --url sqlite:///path/db.sqlite)")?;
+            // NEVER persist a password to config.toml: strip it from the stored
+            // url and migrate any embedded password into the OS keyring.
+            let embedded_pw = util::url_password(&raw_url);
             let profile = Profile {
                 name: name.clone(),
-                url,
+                url: util::strip_url_password(&raw_url),
                 prod: prod || existing.as_ref().map(|p| p.prod).unwrap_or(false),
                 readonly: readonly || existing.as_ref().map(|p| p.readonly).unwrap_or(false),
                 no_history: existing.as_ref().map(|p| p.no_history).unwrap_or(false),
             };
+
+            // Store the secret (prompted, or migrated from the URL) keyed on the
+            // stable user@host:port/db identity — never the profile name — so a
+            // re-typed URL resolves the same entry and two databases can't collide.
+            let pw = if set_password {
+                Some(rpassword::prompt_password(format!("Password for `{name}`: "))?)
+            } else {
+                embedded_pw
+            };
+            if let Some(pw) = pw {
+                match creds::pg_identity(&profile.url).map(|id| creds::identity_key(&id)) {
+                    Some(key) => {
+                        secrets::set(&key, &pw)?;
+                        println!("stored password for `{key}` in the OS keyring");
+                    }
+                    None => eprintln!("nsql: note: this URL has no host/db to key a secret on"),
+                }
+            }
+
             cfg.upsert(profile);
             cfg.save(paths)?;
             println!("saved profile `{name}`");
-
-            if set_password {
-                let pw = rpassword::prompt_password(format!("Password for `{name}`: "))?;
-                secrets::set(&name, &pw)?;
-                println!("stored password for `{name}` in the OS keyring");
-            }
             Ok(())
         }
 

@@ -45,8 +45,30 @@ behavior if nvim / introspection / a plugin / the DB is missing.
   deterministic `--clean` round-trip test **and** a real-config pty run (no smcup;
   result in pane; clipboard = `total\n60`).
 
-Remaining: recents-resume · CLI collapse to `-e`/`-y` · history-ring tabs · schema
-completion · credential hardening (`.pgpass` + keyring re-key).
+- ✅ **Step 2 — zero-setup resume + credential hardening.** `recents.toml`
+  (`state_dir`, **0600** in a **0700** dir, atomic `write_private` — no TOCTOU)
+  records each interactively-chosen connection **with the password stripped**
+  (`util::strip_url_password`, distinct from the display-only `redact_url`). Bare
+  `nsql` resumes `recents[0]` (else the bootstrapped `local`); a positional can be
+  a URL, a recents **label**, a recents **index**, or a saved profile;
+  `no_history` profiles are never recorded; scripted `-e`/pipe one-shots don't pin.
+  Passwords resolve at connect time via **PGPASSWORD → ~/.pgpass → OS keyring**,
+  and the keyring is now **keyed on `user@host:port/db`** (fixes the cross-host
+  collision leak — `connect --set-password` stores under the same identity).
+  Verified: password never on disk; perms 600/700; resume + index/label targets
+  work.
+- ✅ **Adversarial security review** (13 findings, each independently verified) and
+  fixes: (HIGH) `connect --url …:pw@…` no longer persists the password to
+  config.toml — it's stripped to the keyring under the stable identity; (HIGH) a
+  password containing `@` no longer leaks (`redact_url`/`strip_url_password` now use
+  the *last* `@` in the authority); config.toml is written `0600` and all nsql dirs
+  are `0700`; `persist_scratch` uses the TOCTOU-safe writer; the spawned editor no
+  longer inherits `PGPASSWORD`; `~/.pgpass` rejects non-regular files.
+  Accepted/inherent: `history.sqlite` stores raw SQL (may contain literal secrets)
+  — kept `0600` in a `0700` dir, like a shell history.
+
+Remaining: CLI collapse to `-e`/`-y` · history-ring tabs · schema completion ·
+interactive "save password to keyring?" prompt on first connect.
 
 ## Build order (friction-removed-per-effort)
 

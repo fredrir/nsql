@@ -54,7 +54,10 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
 
     let (program, kind) = util::resolve_editor()?;
     let mut cmd = Command::new(&program);
-    cmd.env("NSQL_STATUS", status_line(profile));
+    // Don't leak a connection secret into the editor's env (its plugins could
+    // read it); nsql passes connections to any LSP explicitly, not via PGPASSWORD.
+    cmd.env("NSQL_STATUS", status_line(profile))
+        .env_remove("PGPASSWORD");
     match kind {
         EditorKind::Nvim => {
             cmd.arg("-i")
@@ -101,14 +104,9 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
 }
 
 pub(crate) fn persist_scratch(path: &std::path::Path, body: &str) -> Result<()> {
-    std::fs::write(path, body)?;
-    set_0600(path);
-    Ok(())
-}
-
-fn set_0600(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    // O_EXCL+0600 temp + rename — no write-then-chmod TOCTOU. The scratch may
+    // hold a partially-typed query, so keep it owner-only.
+    crate::util::write_private(path, body.as_bytes())
 }
 
 const INJECT_LUA: &str = include_str!("../assets/inject.lua");

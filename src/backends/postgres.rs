@@ -12,7 +12,7 @@
 
 use crate::config::Profile;
 use crate::db::{first_keyword, Cell, QueryResult, ROW_CAP};
-use crate::{secrets, util};
+use crate::util;
 use anyhow::{Context, Result};
 use postgres::SimpleQueryMessage;
 use std::str::FromStr;
@@ -21,7 +21,7 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
     let mut cfg = postgres::Config::from_str(&profile.url)
         .with_context(|| format!("parsing connection url {}", util::redact_url(&profile.url)))?;
     if !url_has_password(&profile.url) {
-        if let Some(pw) = resolve_password(profile) {
+        if let Some(pw) = crate::creds::resolve_password(profile) {
             cfg.password(pw);
         }
     }
@@ -98,13 +98,4 @@ fn url_has_password(url: &str) -> bool {
         .and_then(|(_, rest)| rest.split_once('@'))
         .map(|(userinfo, _)| userinfo.contains(':'))
         .unwrap_or(false)
-}
-
-fn resolve_password(profile: &Profile) -> Option<String> {
-    if let Ok(v) = std::env::var("PGPASSWORD") {
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    secrets::get(&profile.name)
 }
