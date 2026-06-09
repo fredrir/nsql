@@ -66,11 +66,15 @@ fn real_main() -> Result<()> {
     };
     let out_tty = std::io::stdout().is_terminal();
 
-    // Acquire the SQL to run and whether to echo it above the result.
-    let (sql, echo) = acquire_sql(&cli, &paths, &profile)?;
-    let Some(sql) = sql else {
-        eprintln!("nsql: cancelled (nothing run)");
-        return Ok(());
+    // Acquire what to do. The interactive embed session runs queries itself and
+    // returns Handled — nothing for main to run or print.
+    let (sql, echo) = match acquire_sql(&cli, &paths, &profile)? {
+        Acquired::Handled => return Ok(()),
+        Acquired::Cancelled => {
+            eprintln!("nsql: cancelled (nothing run)");
+            return Ok(());
+        }
+        Acquired::Run { sql, echo } => (sql, echo),
     };
 
     if db::strip_sql_comments(&sql).trim().is_empty() {
@@ -94,28 +98,44 @@ fn real_main() -> Result<()> {
     render::print(&result, &opts)
 }
 
-/// Returns (Some(sql) to run | None to cancel, echo?).
-fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<(Option<String>, bool)> {
+/// What `acquire_sql` resolved the invocation to.
+enum Acquired {
+    /// A query for main to run + print (one-shot / classic editor).
+    Run { sql: String, echo: bool },
+    /// The user cancelled the editor with nothing to run.
+    Cancelled,
+    /// The interactive embed session already ran everything in-session.
+    #[cfg_attr(not(feature = "embed-editor"), allow(dead_code))]
+    Handled,
+}
+
+fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> {
     if cli.edit || cli.embed {
-        return Ok((compose(paths, profile, cli)?, true));
+        return compose(paths, profile, cli);
     }
     if let Some(e) = &cli.execute {
-        return Ok((Some(e.clone()), false));
+        return Ok(Acquired::Run {
+            sql: e.clone(),
+            echo: false,
+        });
     }
     if let Some(f) = &cli.file {
-        let s = std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?;
-        return Ok((Some(s), false));
+        let sql = std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?;
+        return Ok(Acquired::Run { sql, echo: false });
     }
     if let Some(name) = &cli.favorite {
-        return Ok((Some(favorites::load(paths, name)?), true));
+        return Ok(Acquired::Run {
+            sql: favorites::load(paths, name)?,
+            echo: true,
+        });
     }
     // No explicit source: read a pipe if present, otherwise open the editor.
     if !std::io::stdin().is_terminal() {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s)?;
-        return Ok((Some(s), false));
+        return Ok(Acquired::Run { sql: s, echo: false });
     }
-    Ok((compose(paths, profile, cli)?, true))
+    compose(paths, profile, cli)
 }
 
 /// True if `s` looks like a database connection URL we can dispatch.
@@ -226,17 +246,18 @@ mod tests {
 /// built with the `embed-editor` feature and stdin/stdout are a real terminal;
 /// `--classic` (or a non-tty / a build without the feature) uses the proven
 /// transient-child editor (Mode 1).
-fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Option<String>> {
+fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
     #[cfg(feature = "embed-editor")]
     {
         let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
         if cli.embed && !is_tty {
             anyhow::bail!("--embed needs an interactive terminal");
         }
-        // Inline zero-flash editor: the default on a real terminal, unless
-        // --classic. Non-tty (e.g. --edit while piping) falls back to Mode 1.
+        // Inline zero-flash session: the default on a real terminal, unless
+        // --classic. The session runs queries itself and returns Handled.
         if (cli.embed || !cli.classic) && is_tty {
-            return embed::compose(paths, profile);
+            embed::compose(paths, profile)?;
+            return Ok(Acquired::Handled);
         }
     }
     #[cfg(not(feature = "embed-editor"))]
@@ -244,7 +265,10 @@ fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Option<String>
         anyhow::bail!("--embed requires building with `--features embed-editor`");
     }
 
-    editor::compose(paths, profile)
+    Ok(match editor::compose(paths, profile)? {
+        Some(sql) => Acquired::Run { sql, echo: true },
+        None => Acquired::Cancelled,
+    })
 }
 
 fn run_subcommand(

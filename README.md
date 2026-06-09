@@ -30,9 +30,12 @@ echo "select 'hi' as greeting" | ./target/debug/nsql
 ./target/debug/nsql postgres://user:pass@localhost:5432/mydb
 ./target/debug/nsql "sqlite:///tmp/scratch.db" -e "select 1"
 
-# the main event: compose in your real neovim, run on save+quit
-./target/debug/nsql                # opens nvim on a scratch .sql file
-#   ,,  -> run      ,q -> cancel       (or :wq to run, :cq to cancel)
+# the main event: a persistent inline session in your real neovim
+./target/debug/nsql                # opens nvim; the session stays open
+#   ,r  -> run the statement under the cursor (results in a bottom pane)
+#   :w  -> also previews (runs) without quitting
+#   ,y  -> copy the last result (TSV, via OSC 52)   ,a -> run uncapped
+#   ,R  -> force-run on a prod profile               ,, / ,q -> quit
 ```
 
 On first run it bootstraps a `local` SQLite profile (a `dev.db` under your data
@@ -60,18 +63,28 @@ dir) so everything works immediately.
 `nsql` itself never emits the alternate-screen escape. There's a test that fails
 if it ever does.
 
-### Zero-flash mode — the default
+### Zero-flash session — the default
 
 Mode 1 (above) flashes the alternate screen *during* the edit, then restores it.
-The **default** editor is the zero-flash inline editor, which never enters the
-alternate screen at all. It spawns `nvim --embed` (a headless editing engine that
-draws nothing to the terminal), drives it over msgpack-RPC with your real config /
+The **default** is a persistent zero-flash session that never enters the alternate
+screen at all. It spawns `nvim --embed` (a headless editing engine that draws
+nothing to the terminal), drives it over msgpack-RPC with your real config /
 treesitter / LSP, and renders its `ext_linegrid` redraw stream — **in color** —
-into a ratatui **inline** viewport. Same `,,`/`:wq` run contract; results still
-print to normal scrollback.
+into a ratatui **inline** region split into an editor (top) and a **results pane**
+(bottom).
+
+The session stays open and runs queries on demand:
+
+- `,r` runs the **statement under the cursor**; `:w` also previews. The result
+  shows in the bottom pane — **your scrollback above is never touched or scrolled**,
+  so you keep an eye on your main task.
+- `,y` copies the last result as TSV (OSC 52 — works over SSH). `,a` runs uncapped.
+- `,R` force-runs on a prod-tagged profile (otherwise destructive statements are
+  refused in-session). `,,` / `,q` quit (your buffer is saved for next time).
+- Errors render in the pane; the session keeps going.
 
 ```sh
-nsql            # zero-flash inline editor (default)
+nsql            # zero-flash persistent session (default)
 nsql --classic  # the transient-child editor (Mode 1) instead
 ```
 
@@ -82,20 +95,19 @@ without it, use `cargo build --no-default-features` (then `nsql` uses Mode 1).
 The scratch buffer opens **fully clean** — the active connection + key hints show
 as a dim *virtual line* above it (not buffer text, so never saved or run).
 
-**Status:** verified end-to-end against real nvim (no smcup; type/paste → `:wq` →
-result in scrollback). Done: **M1** (loop, input, exit/readback), **M2**
-(syntax-highlight colors via `hl_attr_define`/`default_colors_set`), and **M3 so
-far** (bracketed paste → `nvim_paste` for clean multi-line paste; width-resize;
-cursor-shape from `mode_change`; clean buffer). Remaining M3: mouse
-(`nvim_input_mouse`) and broader special-key coverage. Completion popup / cmdline /
-messages already render in-grid (single-grid `ext_linegrid`). Falls back to Mode 1
-automatically when there's no terminal (e.g. `--edit` while piping).
+**Status:** verified end-to-end against real nvim (no smcup; `,r` runs → result in
+the bottom pane; `,y` copies via OSC 52; scrollback above untouched). Editor
+features done: color highlights, bracketed paste, width-resize, cursor-shape, clean
+buffer, and the run-without-quit results pane. Remaining: mouse
+(`nvim_input_mouse`), broader special keys, and the daily-driver ergonomics in
+ERGONOMICS.md (recents-resume, the 2-flag CLI, query tabs, schema completion). Falls
+back to Mode 1 automatically when there's no terminal (e.g. `--edit` while piping).
 
 ## Commands
 
 | Command | What |
 |---|---|
-| `nsql` | open the zero-flash inline editor, run on save, print |
+| `nsql` | open the zero-flash persistent session (`,r` run · `,y` copy · `,,` quit) |
 | `nsql --classic` | use the classic transient-child editor (Mode 1) instead |
 | `nsql --edit` | force the editor even when piping |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |

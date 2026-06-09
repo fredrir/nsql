@@ -78,6 +78,12 @@ impl Options {
 }
 
 pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
+    pager::emit(&format(result, opts), opts.is_tty)
+}
+
+/// Render a result to a String (no paging, no I/O). Used by `print` and by the
+/// in-session results pane (which renders without ever touching the pager).
+pub fn format(result: &QueryResult, opts: &Options) -> String {
     let fmt = opts.resolved();
     // Human formats get the query echo, a row-count footer, and cap notes.
     // Machine formats (tsv/csv/json) stay clean so they pipe into jq/etc.
@@ -137,7 +143,7 @@ pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
         }
     }
 
-    pager::emit(&out, opts.is_tty)
+    out
 }
 
 fn render_table(out: &mut String, columns: &[String], rows: &[Vec<Cell>]) {
@@ -321,5 +327,23 @@ mod tests {
     fn null_distinct_from_empty() {
         assert_eq!(display_cell(&Cell::Null), "(null)");
         assert_eq!(display_cell(&Cell::Text(String::new())), "");
+    }
+
+    #[test]
+    fn format_produces_table_text() {
+        let result = crate::db::QueryResult::Rows {
+            columns: vec!["n".into(), "g".into()],
+            rows: vec![vec![Cell::Int(7), Cell::Text("hi".into())]],
+            truncated: None,
+        };
+        let opts = Options {
+            format: Format::Table,
+            is_tty: true,
+            echo: None,
+            elapsed: None,
+        };
+        let s = format(&result, &opts);
+        assert!(s.contains('7') && s.contains("hi") && s.contains('n'));
+        assert!(s.contains("(1 row"));
     }
 }
