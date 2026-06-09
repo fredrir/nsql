@@ -35,10 +35,15 @@ pub struct Cli {
     #[arg(long = "edit")]
     pub edit: bool,
 
-    /// Use the zero-flash inline editor — nvim never touches the alternate
-    /// screen (requires building with --features embed-editor)
+    /// Force the zero-flash inline editor (the default when built with the
+    /// embed-editor feature and stdin/stdout are a terminal)
     #[arg(long = "embed")]
     pub embed: bool,
+
+    /// Force the classic transient-child editor (Mode 1) instead of the inline
+    /// zero-flash editor
+    #[arg(long = "classic")]
+    pub classic: bool,
 
     /// Expanded / vertical output (one field per line) — good for wide rows
     #[arg(short = 'x', long = "expanded")]

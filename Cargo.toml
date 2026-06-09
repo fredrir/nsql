@@ -11,7 +11,7 @@ name = "nsql"
 path = "src/main.rs"
 
 [features]
-default = ["keyring-store"]
+default = ["keyring-store", "embed-editor"]
 # OS-keychain credential storage. Disable with --no-default-features if the
 # secret-service/zbus stack is unavailable or you want a leaner build.
 keyring-store = ["dep:keyring"]

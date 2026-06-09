@@ -26,6 +26,10 @@ cargo test                       # includes the "never emit alt-screen" invarian
 echo "select 'hi' as greeting" | ./target/debug/nsql
 ./target/debug/nsql --json -e "select 1 as a"   | jq
 
+# connect ad-hoc to any database by URL (no profile needed)
+./target/debug/nsql postgres://user:pass@localhost:5432/mydb
+./target/debug/nsql "sqlite:///tmp/scratch.db" -e "select 1"
+
 # the main event: compose in your real neovim, run on save+quit
 ./target/debug/nsql                # opens nvim on a scratch .sql file
 #   ,,  -> run      ,q -> cancel       (or :wq to run, :cq to cancel)
@@ -35,6 +39,11 @@ On first run it bootstraps a `local` SQLite profile (a `dev.db` under your data
 dir) so everything works immediately.
 
 ## How the editor loop works
+
+> The **default** editor is the zero-flash inline editor (next section). The
+> transient-child model below is what `--classic` (and any non-tty / no-feature
+> build) uses; it's the same `,,`/`:wq` contract, so read it first — the
+> zero-flash mode just removes the brief alt-screen flash in step 2.
 
 `nsql` is the top-level process; your nvim is a **transient blocking child**:
 
@@ -51,41 +60,44 @@ dir) so everything works immediately.
 `nsql` itself never emits the alternate-screen escape. There's a test that fails
 if it ever does.
 
-### Zero-flash mode (`--embed`, opt-in)
+### Zero-flash mode — the default
 
-Mode 1 above flashes the alternate screen *during* the edit (then restores it).
-If you want **zero** flash, build with the `embed-editor` feature and use
-`--embed`:
+Mode 1 (above) flashes the alternate screen *during* the edit, then restores it.
+The **default** editor is the zero-flash inline editor, which never enters the
+alternate screen at all. It spawns `nvim --embed` (a headless editing engine that
+draws nothing to the terminal), drives it over msgpack-RPC with your real config /
+treesitter / LSP, and renders its `ext_linegrid` redraw stream — **in color** —
+into a ratatui **inline** viewport. Same `,,`/`:wq` run contract; results still
+print to normal scrollback.
 
 ```sh
-cargo build --release --features embed-editor
-nsql --embed        # nvim runs headless over RPC; its grid renders in an
-                    # inline viewport — the alternate screen is NEVER entered
+nsql            # zero-flash inline editor (default)
+nsql --classic  # the transient-child editor (Mode 1) instead
 ```
 
-`nsql --embed` spawns `nvim --embed` (a headless editing engine that draws
-nothing to the terminal), drives it over msgpack-RPC with your real config /
-treesitter / LSP, and renders its `ext_linegrid` redraw stream into a ratatui
-**inline** viewport. Same `,,`/`:wq` run contract; results still print to normal
-scrollback. The async machinery (tokio/ratatui/nvim-rs) is contained entirely in
-`src/embed.rs` behind the feature flag — the default build stays sync and lean
-(+~0.7 MB with the feature).
+The async machinery (tokio/ratatui/nvim-rs) lives entirely in `src/embed.rs`
+behind the `embed-editor` feature (on by default). For a leaner, fully-sync build
+without it, use `cargo build --no-default-features` (then `nsql` uses Mode 1).
 
-**M1 status / limitations:** functional and verified end-to-end (no smcup, real
-nvim, type → `:wq` → result in scrollback). The renderer is currently
-**monochrome** — syntax-highlight colors (`hl_attr_define`/`default_colors_set`),
-a popup-menu/cmdline overlay, dynamic resize and full input fidelity are **M2/M3**.
-Mode 1 remains the default.
+**Status:** verified end-to-end against real nvim (no smcup; type/paste → `:wq` →
+result in scrollback). Done: **M1** (loop, input, exit/readback), **M2**
+(syntax-highlight colors via `hl_attr_define`/`default_colors_set`), and **M3 so
+far** (bracketed paste → `nvim_paste` for clean multi-line paste; width-resize).
+Remaining M3 polish: mouse (`nvim_input_mouse`), cursor-shape (`mode_change`), and
+broader special-key coverage. Completion popup / cmdline / messages already render
+in-grid (single-grid `ext_linegrid`). Falls back to Mode 1 automatically when
+there's no terminal (e.g. `--edit` while piping).
 
 ## Commands
 
 | Command | What |
 |---|---|
-| `nsql` | open the editor, run on save, print |
+| `nsql` | open the zero-flash inline editor, run on save, print |
+| `nsql --classic` | use the classic transient-child editor (Mode 1) instead |
 | `nsql --edit` | force the editor even when piping |
-| `nsql --embed` | zero-flash inline editor — nvim never touches the alt screen (needs `--features embed-editor`) |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |
-| `nsql @prod ...` / `-p prod` | pick a connection profile |
+| `nsql postgres://…` | connect ad-hoc to a URL (unsaved, one-off) |
+| `nsql @prod ...` / `-p prod` | pick a saved connection profile |
 | `nsql -x` / `--json` / `--format csv\|tsv\|table` | output modes |
 | `nsql --all` | don't cap rows (default cap: 1000) |
 | `nsql -y` | skip the prod-destructive confirmation |
@@ -131,12 +143,15 @@ readonly = true
 
 ## Build notes
 
-- Single sync binary. SQLite is live via `rusqlite` (bundled — no system lib).
-- `cargo build --no-default-features` drops OS-keyring support (for environments
-  without a Secret Service / for a leaner build).
-- Phase-2 multi-engine (`sqlx`/`tokio-postgres`), warm-nvim `--listen` reuse,
-  `--embed` zero-flash mode, visual-mode run-selection, and docker discovery are
-  laid out in DESIGN.md §12.
+- SQLite is live via `rusqlite` (bundled — no system lib); Postgres via the sync
+  `postgres` crate. The DB layer is fully sync.
+- The **default** build includes the `embed-editor` feature (the zero-flash inline
+  editor → +tokio/ratatui/nvim-rs, ~+0.7 MB). The async lives only inside
+  `src/embed.rs` in a runtime scoped to the edit; the rest of nsql stays sync.
+- `cargo build --no-default-features` drops the embed editor **and** OS-keyring
+  support for a lean, fully-sync binary (`nsql` then uses the Mode-1 editor).
+- Remaining roadmap (Postgres TLS/SSH, cancellation, introspection, parameterized
+  favorites, embed M3) is laid out in PHASE3.md and DESIGN.md §12.
 
 ## Backends
 

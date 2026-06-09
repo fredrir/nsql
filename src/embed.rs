@@ -21,11 +21,16 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use nvim_rs::compat::tokio::Compat;
 use nvim_rs::{Handler, Neovim, UiAttachOptions, Value};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+};
+use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::layout::Position;
-use ratatui::text::{Line, Text};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
+use std::collections::HashMap;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -107,6 +112,10 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
 
     // Raw-mode key reader on a dedicated thread (poll so it can shut down).
     enable_raw_mode().context("enabling raw mode")?;
+    // Bracketed paste: multi-line pastes arrive as one Event::Paste so we can
+    // forward them via nvim_paste instead of replaying keystrokes (which would
+    // trigger mappings/autopairs and mangle pasted SQL).
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let shutdown = Arc::new(AtomicBool::new(false));
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
     {
@@ -168,10 +177,15 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
                             let _ = nvim.input(&input).await;
                         }
                     }
-                    Event::Resize(w, h) => {
-                        let h = (h.saturating_sub(2)).clamp(3, 24);
-                        grid.resize(w as usize, h as usize);
-                        let _ = nvim.ui_try_resize(w as i64, h as i64).await;
+                    Event::Paste(text) => {
+                        let _ = nvim.paste(&text, false, -1).await;
+                    }
+                    Event::Resize(w, _h) => {
+                        // Keep the inline viewport height fixed (ratatui can't
+                        // resize it live); follow the new width.
+                        grid.resize(w as usize, height as usize);
+                        let _ = nvim.ui_try_resize(w as i64, height as i64).await;
+                        let _ = terminal.autoresize();
                         let _ = terminal.clear();
                     }
                     _ => {}
@@ -185,6 +199,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
     };
 
     shutdown.store(true, Ordering::Relaxed);
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = terminal.clear(); // wipe the inline viewport; results print below
     Ok(code)
 }
@@ -254,7 +269,7 @@ fn draw(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdo
             .cells
             .iter()
             .take(area.height as usize)
-            .map(|row| Line::from(row.iter().collect::<String>()))
+            .map(|row| render_row(grid, row, area.width as usize))
             .collect();
         frame.render_widget(Paragraph::new(Text::from(lines)), area);
         let cx = (grid.cursor.0 as u16).min(area.width.saturating_sub(1));
@@ -263,13 +278,88 @@ fn draw(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdo
     });
 }
 
+/// Build one styled line, coalescing runs of cells that share a highlight.
+fn render_row(grid: &Grid, row: &[GCell], width: usize) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut cur: Option<Style> = None;
+    for cell in row.iter().take(width) {
+        let style = resolve_style(grid, cell.hl);
+        if cur != Some(style) {
+            if !buf.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut buf), cur.unwrap_or_default()));
+            }
+            cur = Some(style);
+        }
+        buf.push(cell.ch);
+    }
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, cur.unwrap_or_default()));
+    }
+    Line::from(spans)
+}
+
+fn resolve_style(grid: &Grid, hl: u16) -> Style {
+    let a = grid.hl.get(&hl).copied().unwrap_or_default();
+    let mut s = Style::default();
+    if let Some(fg) = a.fg.or(grid.def_fg) {
+        s = s.fg(rgb(fg));
+    }
+    if let Some(bg) = a.bg.or(grid.def_bg) {
+        s = s.bg(rgb(bg));
+    }
+    if a.bold {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    if a.italic {
+        s = s.add_modifier(Modifier::ITALIC);
+    }
+    if a.underline {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
+    if a.reverse {
+        s = s.add_modifier(Modifier::REVERSED);
+    }
+    s
+}
+
+fn rgb(v: u32) -> Color {
+    Color::Rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
+}
+
 // ---- grid model ----------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct GCell {
+    ch: char,
+    hl: u16,
+}
+
+impl Default for GCell {
+    fn default() -> Self {
+        GCell { ch: ' ', hl: 0 }
+    }
+}
+
+/// A resolved highlight (subset of nvim's `hl_attr_define` rgb attributes).
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Attr {
+    fg: Option<u32>,
+    bg: Option<u32>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    reverse: bool,
+}
 
 struct Grid {
     w: usize,
     h: usize,
-    cells: Vec<Vec<char>>,
+    cells: Vec<Vec<GCell>>,
     cursor: (usize, usize), // (col, row)
+    hl: HashMap<u16, Attr>,
+    def_fg: Option<u32>,
+    def_bg: Option<u32>,
 }
 
 impl Grid {
@@ -277,20 +367,23 @@ impl Grid {
         Self {
             w,
             h,
-            cells: vec![vec![' '; w]; h],
+            cells: vec![vec![GCell::default(); w]; h],
             cursor: (0, 0),
+            hl: HashMap::new(),
+            def_fg: None,
+            def_bg: None,
         }
     }
     fn resize(&mut self, w: usize, h: usize) {
         self.w = w;
         self.h = h;
-        self.cells = vec![vec![' '; w]; h];
+        self.cells = vec![vec![GCell::default(); w]; h];
         self.cursor = (0, 0);
     }
     fn clear(&mut self) {
         for row in &mut self.cells {
             for c in row.iter_mut() {
-                *c = ' ';
+                *c = GCell::default();
             }
         }
     }
@@ -320,10 +413,47 @@ fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
                 }
                 "grid_line" => apply_grid_line(grid, p),
                 "grid_scroll" => apply_grid_scroll(grid, p),
+                "default_colors_set" => {
+                    // [rgb_fg, rgb_bg, rgb_sp, cterm_fg, cterm_bg]
+                    grid.def_fg = uget(p, 0).map(|v| v as u32);
+                    grid.def_bg = uget(p, 1).map(|v| v as u32);
+                }
+                "hl_attr_define" => {
+                    if let Some((id, attr)) = parse_hl(p) {
+                        grid.hl.insert(id, attr);
+                    }
+                }
                 _ => {}
             }
         }
     }
+}
+
+fn parse_hl(p: &[Value]) -> Option<(u16, Attr)> {
+    // [id, rgb_attr (map), cterm_attr (map), info]
+    let id = uget(p, 0)? as u16;
+    let m = p.get(1)?;
+    let b = |key: &str| map_get(m, key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let attr = Attr {
+        fg: map_get(m, "foreground").and_then(|v| v.as_u64()).map(|v| v as u32),
+        bg: map_get(m, "background").and_then(|v| v.as_u64()).map(|v| v as u32),
+        bold: b("bold"),
+        italic: b("italic"),
+        underline: b("underline") || b("undercurl") || b("underdouble"),
+        reverse: b("reverse"),
+    };
+    Some((id, attr))
+}
+
+fn map_get<'a>(m: &'a Value, key: &str) -> Option<&'a Value> {
+    if let Value::Map(entries) = m {
+        for (k, v) in entries {
+            if k.as_str() == Some(key) {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
@@ -338,14 +468,19 @@ fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
     let Some(cells) = p.get(3).and_then(|v| v.as_array()) else {
         return;
     };
+    // hl id carries over to following cells that omit it (nvim ui spec).
+    let mut last_hl: u16 = 0;
     for cell in cells {
         let Some(c) = cell.as_array() else { continue };
         let text = c.first().and_then(|v| v.as_str()).unwrap_or(" ");
+        if let Some(h) = c.get(1).and_then(|v| v.as_u64()) {
+            last_hl = h as u16;
+        }
         let repeat = c.get(2).and_then(|v| v.as_u64()).unwrap_or(1).max(1);
         let ch = text.chars().next().unwrap_or(' ');
         for _ in 0..repeat {
             if col < grid.w {
-                grid.cells[row][col] = ch;
+                grid.cells[row][col] = GCell { ch, hl: last_hl };
                 col += 1;
             }
         }
@@ -370,7 +505,7 @@ fn apply_grid_scroll(grid: &mut Grid, p: &[Value]) {
         }
         for dst in bot.saturating_sub(r)..bot.min(grid.h) {
             for col in left..right.min(grid.w) {
-                grid.cells[dst][col] = ' ';
+                grid.cells[dst][col] = GCell::default();
             }
         }
     } else if rows < 0 {
@@ -382,7 +517,7 @@ fn apply_grid_scroll(grid: &mut Grid, p: &[Value]) {
         }
         for dst in top..(top + r).min(grid.h) {
             for col in left..right.min(grid.w) {
-                grid.cells[dst][col] = ' ';
+                grid.cells[dst][col] = GCell::default();
             }
         }
     }
@@ -442,8 +577,38 @@ mod tests {
             ]),
         ];
         apply_grid_line(&mut g, &p);
-        assert_eq!(g.cells[0][0], 'H');
-        assert_eq!(g.cells[0][1], 'i');
+        assert_eq!(g.cells[0][0].ch, 'H');
+        assert_eq!(g.cells[0][1].ch, 'i');
+    }
+
+    #[test]
+    fn hl_attr_and_default_colors_parse() {
+        let mut g = Grid::new(4, 1);
+        // default_colors_set [fg, bg, sp, ...]
+        apply_redraw(
+            &mut g,
+            &[Value::Array(vec![
+                Value::from("default_colors_set"),
+                Value::Array(vec![Value::from(0xeeeeeeu64), Value::from(0x111111u64), Value::from(0)]),
+            ])],
+        );
+        assert_eq!(g.def_fg, Some(0xeeeeee));
+        assert_eq!(g.def_bg, Some(0x111111));
+        // hl_attr_define id=7 with a foreground + bold
+        let attrmap = Value::Map(vec![
+            (Value::from("foreground"), Value::from(0xff0000u64)),
+            (Value::from("bold"), Value::from(true)),
+        ]);
+        apply_redraw(
+            &mut g,
+            &[Value::Array(vec![
+                Value::from("hl_attr_define"),
+                Value::Array(vec![Value::from(7u64), attrmap, Value::Map(vec![]), Value::Array(vec![])]),
+            ])],
+        );
+        let a = g.hl.get(&7).copied().unwrap();
+        assert_eq!(a.fg, Some(0xff0000));
+        assert!(a.bold);
     }
 
     /// End-to-end against REAL nvim (no tty needed): spawn `nvim --embed`, attach
@@ -494,7 +659,7 @@ mod tests {
 
             grid.cells
                 .iter()
-                .map(|r| r.iter().collect::<String>())
+                .map(|r| r.iter().map(|c| c.ch).collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n")
         });
@@ -512,9 +677,63 @@ mod tests {
         );
     }
 
+    /// Prove the M2 color pipeline against real nvim: force a concrete Normal
+    /// highlight and confirm we decode its rgb foreground from the redraw stream.
+    #[test]
+    fn embed_captures_highlight_colors() {
+        if crate::util::find_on_path("nvim").is_none() {
+            eprintln!("skip: nvim not on PATH");
+            return;
+        }
+        use std::time::Duration;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let captured = rt.block_on(async {
+            let mut cmd = Command::new("nvim");
+            cmd.arg("--embed").arg("--clean");
+            let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<Vec<Value>>();
+            let (nvim, _io, mut child) =
+                nvim_rs::create::tokio::new_child_cmd(&mut cmd, RedrawHandler { tx: redraw_tx })
+                    .await
+                    .expect("spawn");
+            let mut opts = UiAttachOptions::new();
+            opts.set_linegrid_external(true);
+            opts.set_rgb(true);
+            nvim.ui_attach(80, 6, &opts).await.expect("attach");
+            nvim.command("set termguicolors").await.ok();
+            nvim.command("highlight Normal guifg=#abcdef guibg=#123456")
+                .await
+                .ok();
+
+            let mut grid = Grid::new(80, 6);
+            let mut found = false;
+            while let Ok(Some(batch)) =
+                tokio::time::timeout(Duration::from_millis(500), redraw_rx.recv()).await
+            {
+                apply_redraw(&mut grid, &batch);
+                if grid.def_fg.is_some() || grid.hl.values().any(|a| a.fg.is_some()) {
+                    found = true;
+                    break;
+                }
+            }
+            nvim.input(":qa!<CR>").await.ok();
+            let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+            (found, grid.def_fg)
+        });
+
+        assert!(
+            captured.0,
+            "no rgb foreground decoded from redraw stream (def_fg={:?})",
+            captured.1
+        );
+    }
+
     fn grid_has(g: &Grid, needle: &str) -> bool {
         g.cells
             .iter()
-            .any(|r| r.iter().collect::<String>().contains(needle))
+            .any(|r| r.iter().map(|c| c.ch).collect::<String>().contains(needle))
     }
 }

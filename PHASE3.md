@@ -136,16 +136,29 @@ the plan below front-loads that shared core and orders everything by value-per-e
 
 ## Progress
 
-- ✅ **Zero-flash `--embed` editor — M1 shipped** (behind the `embed-editor` cargo
-  feature + `--embed` flag; Mode 1 remains default). Spawns `nvim --embed` over
-  msgpack-RPC (nvim-rs), renders the `ext_linegrid` stream into a ratatui inline
+- ✅ **Zero-flash editor — M1 + M2 shipped, now the DEFAULT** (`embed-editor`
+  feature is on by default; `--classic` opts back to Mode 1; auto-falls-back to
+  Mode 1 with no terminal / no feature). Spawns `nvim --embed` over msgpack-RPC
+  (nvim-rs), renders the `ext_linegrid` stream into a ratatui inline
   `Viewport::Inline`, reuses the `,,`/`:wq` exit-code + temp-file contract.
-  Verified end-to-end against real nvim 0.12.2: a headless test (type → grid
-  renders → `:wq` → readback) **and** a pty drive asserting **no smcup** with the
-  result printed to scrollback. A select-loop starvation bug (chatty configs
-  starving keypresses) was found and fixed via the pty test. Monochrome renderer;
-  **M2** = `hl_attr_define`/`default_colors_set` color + cursor/mode + popupmenu/
-  cmdline overlays; **M3** = resize/`u16` clamping/input fidelity.
+  - **M1** (loop, crossterm input → `nvim_input`, exit/readback): a select-loop
+    starvation bug (chatty configs starving keypresses) was found via the pty
+    drive and fixed.
+  - **M2** (color): `hl_attr_define`/`default_colors_set` decoded into per-cell
+    rgb highlights, coalesced into styled ratatui spans.
+  - Verified end-to-end against real nvim 0.12.2: headless tests (type → grid
+    renders → `:wq` → readback; forced highlight → rgb fg decoded) **and** a pty
+    drive asserting **no smcup** with the result printed to scrollback.
+  - **M3 (in progress):** ✅ bracketed paste → `nvim_paste` (clean multi-line
+    paste, verified via pty) · ✅ width-resize follow. Note: popup-menu / cmdline /
+    messages already render in-grid because we use single-grid `ext_linegrid`
+    (no externalised UI), so no overlays needed. Remaining: mouse
+    (`nvim_input_mouse`), cursor-shape (`mode_change`), broader special-key coverage.
+
+- ✅ **Ad-hoc connection URLs** — `nsql postgres://user:pass@host/db [-e …]` connects
+  to an unsaved, one-off database (a leading DB-URL positional is pulled out before
+  clap into an ephemeral profile; password stays redacted in banners/errors).
+  Doesn't disturb `connect --url …` or subcommands. Unit + integration tested.
 
 ## Recommended first 3 tasks (the *other* tracks, for later)
 1. **Connection-pinning refactor** (design the `Conn` enum carrying the cancel handle; formalize `Backend`).

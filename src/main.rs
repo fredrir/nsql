@@ -40,6 +40,10 @@ fn real_main() -> Result<()> {
         _ => true,
     });
 
+    // A bare connection URL (`nsql postgres://…`) is an ad-hoc, unsaved
+    // connection — pull it out before clap so it isn't read as a subcommand.
+    let adhoc_url = extract_adhoc_url(&mut argv);
+
     let cli = Cli::parse_from(argv);
     let profile_override = profile_at.or_else(|| cli.profile.clone());
 
@@ -50,7 +54,16 @@ fn real_main() -> Result<()> {
         return run_subcommand(cmd, &paths, &mut cfg, profile_override.as_deref());
     }
 
-    let profile = cfg.select(profile_override.as_deref())?;
+    let profile = match &adhoc_url {
+        Some(url) => Profile {
+            name: adhoc_name(url),
+            url: url.clone(),
+            prod: false,
+            readonly: false,
+            no_history: false,
+        },
+        None => cfg.select(profile_override.as_deref())?,
+    };
     let out_tty = std::io::stdout().is_terminal();
 
     // Acquire the SQL to run and whether to echo it above the result.
@@ -84,7 +97,7 @@ fn real_main() -> Result<()> {
 /// Returns (Some(sql) to run | None to cancel, echo?).
 fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<(Option<String>, bool)> {
     if cli.edit || cli.embed {
-        return Ok((compose(paths, profile, cli.embed)?, true));
+        return Ok((compose(paths, profile, cli)?, true));
     }
     if let Some(e) = &cli.execute {
         return Ok((Some(e.clone()), false));
@@ -102,22 +115,135 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<(Option<St
         std::io::stdin().read_to_string(&mut s)?;
         return Ok((Some(s), false));
     }
-    Ok((compose(paths, profile, false)?, true))
+    Ok((compose(paths, profile, cli)?, true))
 }
 
-/// Open the compose editor — the zero-flash embedded renderer when requested and
-/// available, otherwise the proven transient-child (Mode 1) editor.
-fn compose(paths: &Paths, profile: &Profile, want_embed: bool) -> Result<Option<String>> {
-    if want_embed {
-        #[cfg(feature = "embed-editor")]
-        {
+/// True if `s` looks like a database connection URL we can dispatch.
+fn is_db_url(s: &str) -> bool {
+    matches!(
+        s.split_once("://").map(|(scheme, _)| scheme),
+        Some("postgres" | "postgresql" | "mysql" | "mariadb" | "sqlite")
+    )
+}
+
+/// Pull a leading bare connection URL out of argv (the first positional token, so
+/// it never swallows an option value like `connect --url …`). Returns the URL.
+fn extract_adhoc_url(argv: &mut Vec<String>) -> Option<String> {
+    const VALUE_FLAGS: &[&str] = &[
+        "-e", "--execute", "-f", "--file", "-F", "--favorite", "-p", "--profile", "--format",
+    ];
+    let mut i = 1;
+    let mut skip_value = false;
+    while i < argv.len() {
+        let a = &argv[i];
+        if skip_value {
+            skip_value = false;
+            i += 1;
+            continue;
+        }
+        if a == "--" {
+            break;
+        }
+        if a.starts_with('-') {
+            if VALUE_FLAGS.contains(&a.as_str()) {
+                skip_value = true;
+            }
+            i += 1;
+            continue;
+        }
+        // First positional token: take it only if it's a URL, else leave it
+        // (it's a subcommand or other arg) and stop scanning.
+        return if is_db_url(a) {
+            Some(argv.remove(i))
+        } else {
+            None
+        };
+    }
+    None
+}
+
+/// A short, secret-free label for an ad-hoc connection (the database name).
+fn adhoc_name(url: &str) -> String {
+    url.rsplit('/')
+        .next()
+        .map(|s| s.split('?').next().unwrap_or(s))
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ad-hoc")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        std::iter::once("nsql")
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn extracts_leading_url() {
+        let mut a = argv(&["postgres://u:p@h/db", "-e", "select 1"]);
+        assert_eq!(
+            extract_adhoc_url(&mut a).as_deref(),
+            Some("postgres://u:p@h/db")
+        );
+        assert_eq!(a, argv(&["-e", "select 1"]));
+    }
+
+    #[test]
+    fn does_not_steal_connect_url() {
+        // The URL here is the value of `--url`, not a bare positional.
+        let mut a = argv(&["connect", "prod", "--url", "postgres://u@h/db"]);
+        assert_eq!(extract_adhoc_url(&mut a), None);
+    }
+
+    #[test]
+    fn ignores_non_url_positional() {
+        let mut a = argv(&["profiles"]);
+        assert_eq!(extract_adhoc_url(&mut a), None);
+    }
+
+    #[test]
+    fn url_after_value_flag() {
+        let mut a = argv(&["-p", "x", "sqlite:///t.db"]);
+        assert_eq!(extract_adhoc_url(&mut a).as_deref(), Some("sqlite:///t.db"));
+    }
+
+    #[test]
+    fn adhoc_name_is_dbname() {
+        assert_eq!(
+            adhoc_name("postgres://u:p@h:5433/pyparser_llunde"),
+            "pyparser_llunde"
+        );
+        assert_eq!(adhoc_name("postgres://u@h/db?sslmode=require"), "db");
+    }
+}
+
+/// Open the compose editor. The zero-flash inline editor is the default when
+/// built with the `embed-editor` feature and stdin/stdout are a real terminal;
+/// `--classic` (or a non-tty / a build without the feature) uses the proven
+/// transient-child editor (Mode 1).
+fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Option<String>> {
+    #[cfg(feature = "embed-editor")]
+    {
+        let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        if cli.embed && !is_tty {
+            anyhow::bail!("--embed needs an interactive terminal");
+        }
+        // Inline zero-flash editor: the default on a real terminal, unless
+        // --classic. Non-tty (e.g. --edit while piping) falls back to Mode 1.
+        if (cli.embed || !cli.classic) && is_tty {
             return embed::compose(paths, profile);
         }
-        #[cfg(not(feature = "embed-editor"))]
-        {
-            anyhow::bail!("--embed requires building with `--features embed-editor`");
-        }
     }
+    #[cfg(not(feature = "embed-editor"))]
+    if cli.embed {
+        anyhow::bail!("--embed requires building with `--features embed-editor`");
+    }
+
     editor::compose(paths, profile)
 }
 

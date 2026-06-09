@@ -146,6 +146,25 @@ fn postgres_backend_when_available() {
 }
 
 #[test]
+fn adhoc_url_runs_without_a_profile() {
+    let home = unique_dir("adhoc");
+    let db = home.join("adhoc.db");
+    let url = format!("sqlite://{}", db.display());
+
+    let (_o, e, ok) = run(
+        &[&url, "-e", "create table t(x int); insert into t values (1),(2),(3)"],
+        &[],
+        &home,
+    );
+    assert!(ok, "ad-hoc DDL failed: {e}");
+
+    let (stdout, stderr, ok) = run(&[&url, "--json", "-e", "select count(*) as n from t"], &[], &home);
+    assert!(ok, "ad-hoc select failed: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(v[0]["n"], 3);
+}
+
+#[test]
 fn readonly_profile_blocks_writes() {
     let home = unique_dir("ro");
     // Create a read-only profile, then try a write.

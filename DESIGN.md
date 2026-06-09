@@ -289,11 +289,12 @@ path are **in scope for MVP** — they're correctness/safety, not polish.
 visual-mode run-selection · `--repeat` session mode with `\c`/`\x`/`\s` · auto-`\x` ·
 Ctrl-R history · MySQL · TLS + SSH tunnel.
 
-**Phase 3:** ✅ zero-flash `--embed` inline editor — M1 (nvim --embed over RPC →
-ratatui inline viewport, no alt screen ever; behind the `embed-editor` feature) ·
-then M2 color/overlays + M3 resize/input · docker discovery · schema introspection
-(`\d`) · export/`\copy` · parameterized favorites · Postgres TLS/SSH (your daily
-critical path). See PHASE3.md for the full brainstorm + value-per-effort ordering.
+**Phase 3:** ✅ zero-flash inline editor — M1 + M2 (nvim --embed over RPC →
+ratatui inline viewport with syntax-highlight colors, no alt screen ever; **now the
+default**, `--classic` for Mode 1) · then M3 overlays/resize/input · docker
+discovery · schema introspection (`\d`) · export/`\copy` · parameterized favorites
+· Postgres TLS/SSH (your daily critical path). See PHASE3.md for the full
+brainstorm + value-per-effort ordering.
 
 ---
 

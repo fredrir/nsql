@@ -7,6 +7,7 @@
 //! backends are wired) should be: explicit URI > env (PG*/DATABASE_URL) >
 //! ~/.pgpass > OS keyring (here) > external managers (op://, pass).
 
+#[cfg(feature = "keyring-store")]
 const SERVICE: &str = "nsql";
 
 #[cfg(feature = "keyring-store")]
