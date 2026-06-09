@@ -1,10 +1,13 @@
 //! nsql — run SQL from your terminal, composed in your real neovim, without
 //! taking over the screen. See DESIGN.md for the architecture and rationale.
 
+mod backends;
 mod cli;
 mod config;
 mod db;
 mod editor;
+#[cfg(feature = "embed-editor")]
+mod embed;
 mod favorites;
 mod history;
 mod pager;
@@ -63,7 +66,9 @@ fn real_main() -> Result<()> {
     }
 
     db::guard(&profile, &sql, cli.yes, out_tty)?;
+    let started = std::time::Instant::now();
     let result = db::run(&profile, &sql, cli.all)?;
+    let elapsed = started.elapsed();
 
     if !profile.no_history {
         if let Err(e) = history::record(&paths, &profile.name, &sql) {
@@ -72,14 +77,14 @@ fn real_main() -> Result<()> {
     }
 
     let echo_text = if echo && out_tty { Some(sql.clone()) } else { None };
-    let opts = render::Options::from_cli(&cli, out_tty, echo_text);
+    let opts = render::Options::from_cli(&cli, out_tty, echo_text, Some(elapsed));
     render::print(&result, &opts)
 }
 
 /// Returns (Some(sql) to run | None to cancel, echo?).
 fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<(Option<String>, bool)> {
-    if cli.edit {
-        return Ok((editor::compose(paths, profile)?, true));
+    if cli.edit || cli.embed {
+        return Ok((compose(paths, profile, cli.embed)?, true));
     }
     if let Some(e) = &cli.execute {
         return Ok((Some(e.clone()), false));
@@ -97,7 +102,23 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<(Option<St
         std::io::stdin().read_to_string(&mut s)?;
         return Ok((Some(s), false));
     }
-    Ok((editor::compose(paths, profile)?, true))
+    Ok((compose(paths, profile, false)?, true))
+}
+
+/// Open the compose editor — the zero-flash embedded renderer when requested and
+/// available, otherwise the proven transient-child (Mode 1) editor.
+fn compose(paths: &Paths, profile: &Profile, want_embed: bool) -> Result<Option<String>> {
+    if want_embed {
+        #[cfg(feature = "embed-editor")]
+        {
+            return embed::compose(paths, profile);
+        }
+        #[cfg(not(feature = "embed-editor"))]
+        {
+            anyhow::bail!("--embed requires building with `--features embed-editor`");
+        }
+    }
+    editor::compose(paths, profile)
 }
 
 fn run_subcommand(

@@ -1,13 +1,15 @@
-//! Query execution.
+//! Query execution: shared result types, the safety guard, and the backend
+//! dispatch. Concrete engines live in `backends/`.
 //!
-//! MVP wires SQLite (live, via rusqlite — no network, no async). Postgres/MySQL
-//! are intentionally stubbed: the `run` dispatch below is the single extension
-//! point where a Phase-2 backend (sqlx/tokio-postgres behind a `Backend` trait)
-//! slots in. The editor loop and rendering are completely engine-agnostic.
+//! SQLite executes via rusqlite (bundled, sync). Postgres executes via the sync
+//! `postgres` crate using the *simple-query protocol*, which returns every
+//! column as text — so we don't have to decode every Postgres type by hand and
+//! the rendering matches psql exactly (NULL stays distinct from empty).
 
+use crate::backends;
 use crate::config::Profile;
 use crate::util;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 /// Default cap so `SELECT * FROM huge_table` doesn't try to render millions of
 /// rows into scrollback. Override with --all.
@@ -38,77 +40,17 @@ pub enum QueryResult {
 /// Execute `sql` against the profile's database.
 pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
     match profile.scheme() {
-        "sqlite" => sqlite_run(&profile.sqlite_target(), sql, all),
-        other @ ("postgres" | "postgresql" | "mysql" | "mariadb") => bail!(
-            "the `{other}` backend is not wired yet — MVP supports sqlite.\n\
-             This is the Phase-2 extension point (see the `run` dispatch in src/db.rs).\n\
+        "sqlite" => backends::sqlite::run(&profile.sqlite_target(), sql, all),
+        "postgres" | "postgresql" => backends::postgres::run(profile, sql, all),
+        other @ ("mysql" | "mariadb") => bail!(
+            "the `{other}` backend isn't wired yet (Postgres + SQLite are). \
+             It slots in next behind the dispatch in src/db.rs / src/backends/.\n\
              profile `{}` url: {}",
             profile.name,
             util::redact_url(&profile.url)
         ),
         other => bail!("unsupported url scheme `{other}` in profile `{}`", profile.name),
     }
-}
-
-fn sqlite_run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
-    use rusqlite::types::ValueRef;
-
-    let conn = if target == ":memory:" {
-        rusqlite::Connection::open_in_memory()
-    } else {
-        rusqlite::Connection::open(target)
-    }
-    .with_context(|| format!("opening sqlite database `{target}`"))?;
-
-    let trimmed = sql.trim();
-    let mut stmt = conn.prepare(trimmed).context("preparing SQL")?;
-    let ncol = stmt.column_count();
-
-    if ncol == 0 {
-        // Non-row statement(s): DML/DDL. Run the whole buffer as a batch so
-        // multi-statement scripts work, and report affected rows.
-        drop(stmt);
-        conn.execute_batch(trimmed).context("executing SQL")?;
-        return Ok(QueryResult::Affected {
-            changes: conn.changes() as usize,
-        });
-    }
-
-    let columns: Vec<String> = stmt
-        .column_names()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let cap = if all { usize::MAX } else { ROW_CAP };
-    let mut rows: Vec<Vec<Cell>> = Vec::new();
-    let mut truncated = None;
-
-    let mut q = stmt.query([])?;
-    while let Some(r) = q.next()? {
-        if rows.len() >= cap {
-            truncated = Some(rows.len());
-            break;
-        }
-        let mut cells = Vec::with_capacity(ncol);
-        for i in 0..ncol {
-            let v = r.get_ref(i)?;
-            cells.push(match v {
-                ValueRef::Null => Cell::Null,
-                ValueRef::Integer(i) => Cell::Int(i),
-                ValueRef::Real(f) => Cell::Real(f),
-                ValueRef::Text(b) => Cell::Text(String::from_utf8_lossy(b).into_owned()),
-                ValueRef::Blob(b) => Cell::Bytes(b.to_vec()),
-            });
-        }
-        rows.push(cells);
-    }
-
-    Ok(QueryResult::Rows {
-        columns,
-        rows,
-        truncated,
-    })
 }
 
 /// Remove `-- line comments` and blanks; used to decide whether a buffer is

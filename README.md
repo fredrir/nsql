@@ -9,9 +9,11 @@ See **[DESIGN.md](./DESIGN.md)** for the full architecture, rationale, and the
 answer to "can nvim run under the hood?" (yes — and the trick is *not* embedding
 a TUI).
 
-> Status: **Phase-1 scaffold.** The primary goal (neovim edit → run → print with
-> scrollback preserved) works end-to-end against SQLite. Postgres/MySQL are
-> stubbed behind a clearly-marked extension point (`run` in `src/db.rs`).
+> Status: **Phase-1 + Postgres.** The primary goal (neovim edit → run → print
+> with scrollback preserved) works end-to-end. **SQLite** (bundled) and
+> **Postgres** (sync `postgres` crate) both execute live; MySQL is stubbed
+> behind the same `Backend` extension point (`run` in `src/db.rs` →
+> `src/backends/`).
 
 ## Quick start
 
@@ -49,12 +51,39 @@ dir) so everything works immediately.
 `nsql` itself never emits the alternate-screen escape. There's a test that fails
 if it ever does.
 
+### Zero-flash mode (`--embed`, opt-in)
+
+Mode 1 above flashes the alternate screen *during* the edit (then restores it).
+If you want **zero** flash, build with the `embed-editor` feature and use
+`--embed`:
+
+```sh
+cargo build --release --features embed-editor
+nsql --embed        # nvim runs headless over RPC; its grid renders in an
+                    # inline viewport — the alternate screen is NEVER entered
+```
+
+`nsql --embed` spawns `nvim --embed` (a headless editing engine that draws
+nothing to the terminal), drives it over msgpack-RPC with your real config /
+treesitter / LSP, and renders its `ext_linegrid` redraw stream into a ratatui
+**inline** viewport. Same `,,`/`:wq` run contract; results still print to normal
+scrollback. The async machinery (tokio/ratatui/nvim-rs) is contained entirely in
+`src/embed.rs` behind the feature flag — the default build stays sync and lean
+(+~0.7 MB with the feature).
+
+**M1 status / limitations:** functional and verified end-to-end (no smcup, real
+nvim, type → `:wq` → result in scrollback). The renderer is currently
+**monochrome** — syntax-highlight colors (`hl_attr_define`/`default_colors_set`),
+a popup-menu/cmdline overlay, dynamic resize and full input fidelity are **M2/M3**.
+Mode 1 remains the default.
+
 ## Commands
 
 | Command | What |
 |---|---|
 | `nsql` | open the editor, run on save, print |
 | `nsql --edit` | force the editor even when piping |
+| `nsql --embed` | zero-flash inline editor — nvim never touches the alt screen (needs `--features embed-editor`) |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |
 | `nsql @prod ...` / `-p prod` | pick a connection profile |
 | `nsql -x` / `--json` / `--format csv\|tsv\|table` | output modes |
@@ -109,10 +138,22 @@ readonly = true
   `--embed` zero-flash mode, visual-mode run-selection, and docker discovery are
   laid out in DESIGN.md §12.
 
-## Known Phase-1 limitations
+## Backends
 
-- Only SQLite executes; other schemes return a clear "not wired yet" error.
+- **SQLite** — bundled (no system lib), full type fidelity.
+- **Postgres** — via the sync `postgres` crate using the *simple-query protocol*,
+  so values render exactly like `psql` and NULL stays distinct from empty.
+  Password resolution when the URL omits it: `PGPASSWORD` env → OS keyring.
+  Caveat: simple-query returns every value as **text**, so `--json` emits numbers
+  as strings (`"42"`); typed/binary mode and TLS/SSL are Phase 3.
+- **MySQL** — stubbed (next behind the dispatch in `src/db.rs`).
+
+## Known limitations
+
 - Statement splitting is naive (single row-returning statement, or a batch of
   non-row statements). Proper splitting + visual-mode run-selection is Phase 2.
+- A zero-row Postgres SELECT shows `(0 rows)` without column headers (the simple
+  protocol gives no column names when there are no rows).
 - No interactive transactions/session state across invocations (verb model).
+- Postgres requires no TLS yet (`NoTls`); managed cloud DBs needing SSL are Phase 3.
 - Unix-only (no Windows path/keyring/editor handling yet).

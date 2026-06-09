@@ -15,12 +15,17 @@ default = ["keyring-store"]
 # OS-keychain credential storage. Disable with --no-default-features if the
 # secret-service/zbus stack is unavailable or you want a leaner build.
 keyring-store = ["dep:keyring"]
+# Zero-flash inline editor: drive `nvim --embed` over msgpack-RPC and render its
+# grid into a ratatui inline viewport (never the alternate screen). Opt-in — the
+# default build stays sync and lean; this pulls tokio/ratatui/nvim-rs.
+embed-editor = ["dep:nvim-rs", "dep:tokio", "dep:ratatui", "dep:async-trait"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 comfy-table = "7"
 rusqlite = { version = "0.32", features = ["bundled"] }
+postgres = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -28,6 +33,12 @@ directories = "5"
 terminal_size = "0.4"
 rpassword = "7"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"], optional = true }
+
+# embed-editor feature only:
+nvim-rs = { version = "0.9", features = ["use_tokio"], optional = true }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "process", "net", "sync", "time"], optional = true }
+ratatui = { version = "0.29", features = ["scrolling-regions"], optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [profile.release]
 strip = true

@@ -30,10 +30,17 @@ pub struct Options {
     /// When set, the SQL is echoed as `-- ` comments above the result so the
     /// query and its output sit together in scrollback (psql-style).
     pub echo: Option<String>,
+    /// Wall-clock for the query; shown in the human footer (`5 rows in 12ms`).
+    pub elapsed: Option<std::time::Duration>,
 }
 
 impl Options {
-    pub fn from_cli(cli: &Cli, is_tty: bool, echo: Option<String>) -> Self {
+    pub fn from_cli(
+        cli: &Cli,
+        is_tty: bool,
+        echo: Option<String>,
+        elapsed: Option<std::time::Duration>,
+    ) -> Self {
         let format = if cli.json {
             Format::Json
         } else if cli.expanded {
@@ -51,6 +58,7 @@ impl Options {
             format,
             is_tty,
             echo,
+            elapsed,
         }
     }
 
@@ -74,6 +82,10 @@ pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
     // Human formats get the query echo, a row-count footer, and cap notes.
     // Machine formats (tsv/csv/json) stay clean so they pipe into jq/etc.
     let human = matches!(fmt, Format::Table | Format::Expanded);
+    let timing = opts
+        .elapsed
+        .map(|d| format!(" in {}", fmt_elapsed(d)))
+        .unwrap_or_default();
     let mut out = String::new();
 
     if human {
@@ -93,7 +105,7 @@ pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
                 let _ = writeln!(out, "{changes}");
             }
             _ => {
-                let _ = writeln!(out, "OK \u{2014} {changes} row(s) affected");
+                let _ = writeln!(out, "OK \u{2014} {changes} row(s) affected{timing}");
             }
         },
         QueryResult::Rows {
@@ -111,7 +123,7 @@ pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
             }
             let n = rows.len();
             if human {
-                let _ = writeln!(out, "({n} row{})", if n == 1 { "" } else { "s" });
+                let _ = writeln!(out, "({n} row{}{timing})", if n == 1 { "" } else { "s" });
                 if truncated.is_some() {
                     let _ = writeln!(
                         out,
@@ -129,6 +141,11 @@ pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
 }
 
 fn render_table(out: &mut String, columns: &[String], rows: &[Vec<Cell>]) {
+    // Zero-row results from the Postgres simple protocol carry no column names;
+    // skip drawing an empty box and let the "(0 rows)" footer speak.
+    if columns.is_empty() {
+        return;
+    }
     use comfy_table::{ContentArrangement, Table};
     let (width, _) = util::term_size();
     let mut t = Table::new();
@@ -274,6 +291,17 @@ pub fn sanitize(s: &str) -> String {
         }
     }
     out
+}
+
+fn fmt_elapsed(d: std::time::Duration) -> String {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms < 1.0 {
+        format!("{}\u{b5}s", d.as_micros())
+    } else if ms < 1000.0 {
+        format!("{ms:.1}ms")
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
 }
 
 #[cfg(test)]

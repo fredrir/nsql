@@ -19,7 +19,7 @@ use std::process::Command;
 
 /// Header lines (as SQL comments) shown at the top of the scratch buffer. They
 /// are stripped before the query runs and before it is echoed.
-fn header(profile: &Profile) -> String {
+pub(crate) fn header(profile: &Profile) -> String {
     format!(
         "-- nsql \u{b7} profile: {} \u{b7} {}\n\
          -- ,, = run     ,q = cancel     (or :wq to run, :cq to cancel)\n",
@@ -32,7 +32,7 @@ fn is_header_line(line: &str) -> bool {
     line.starts_with("-- nsql \u{b7}") || line.starts_with("-- ,, = run")
 }
 
-fn strip_header(text: &str) -> String {
+pub(crate) fn strip_header(text: &str) -> String {
     text.lines()
         .filter(|l| !is_header_line(l))
         .collect::<Vec<_>>()
@@ -97,7 +97,7 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
-fn persist_scratch(path: &std::path::Path, body: &str) -> Result<()> {
+pub(crate) fn persist_scratch(path: &std::path::Path, body: &str) -> Result<()> {
     std::fs::write(path, body)?;
     set_0600(path);
     Ok(())
@@ -110,7 +110,7 @@ fn set_0600(path: &std::path::Path) {
 
 const INJECT_LUA: &str = include_str!("../assets/inject.lua");
 
-fn write_inject(paths: &Paths) -> Result<()> {
+pub(crate) fn write_inject(paths: &Paths) -> Result<()> {
     std::fs::write(&paths.inject_lua, INJECT_LUA)
         .with_context(|| format!("writing {}", paths.inject_lua.display()))?;
     Ok(())

@@ -284,13 +284,16 @@ history(SQLite) + the no-`smcup` CI litmus test. Pager detection, XDG fallbacks,
 byte sanitization, DSN redaction, `O_EXCL` temp files, and the "no editor found"
 path are **in scope for MVP** — they're correctness/safety, not polish.
 
-**Phase 2:** warm-nvim `--listen` reuse · visual-mode run-selection · `--repeat`
-session mode with `\c`/`\x`/`\s` · auto-`\x` · timing · Ctrl-R history · prod
-guardrails (readonly/red/confirm) · MySQL · TLS + SSH tunnel.
+**Phase 2:** ✅ Postgres backend (sync `postgres` crate, simple-query protocol) ·
+✅ query timing · ✅ prod/readonly guardrails — then: warm-nvim `--listen` reuse ·
+visual-mode run-selection · `--repeat` session mode with `\c`/`\x`/`\s` · auto-`\x` ·
+Ctrl-R history · MySQL · TLS + SSH tunnel.
 
-**Phase 3:** `--embed --headless` zero-flash inline editor (the purist mode) ·
-docker discovery · schema introspection (`\d`) · export/`\copy` · parameterized
-favorites.
+**Phase 3:** ✅ zero-flash `--embed` inline editor — M1 (nvim --embed over RPC →
+ratatui inline viewport, no alt screen ever; behind the `embed-editor` feature) ·
+then M2 color/overlays + M3 resize/input · docker discovery · schema introspection
+(`\d`) · export/`\copy` · parameterized favorites · Postgres TLS/SSH (your daily
+critical path). See PHASE3.md for the full brainstorm + value-per-effort ordering.
 
 ---
 

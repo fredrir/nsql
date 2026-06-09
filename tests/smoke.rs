@@ -114,6 +114,37 @@ fn editor_cancel_runs_nothing() {
     assert!(stdout.trim().is_empty(), "cancel should print no result: {stdout}");
 }
 
+/// Runs only when NSQL_TEST_PG_URL points at a reachable Postgres (e.g.
+/// postgres://app:secret@127.0.0.1:55432/app). Skipped otherwise so the suite
+/// stays green without a server.
+#[test]
+fn postgres_backend_when_available() {
+    let Ok(url) = std::env::var("NSQL_TEST_PG_URL") else {
+        eprintln!("skipping postgres test: set NSQL_TEST_PG_URL to run it");
+        return;
+    };
+    let home = unique_dir("pg");
+
+    let (_o, e, ok) = run(&["connect", "pg", "--url", &url], &[], &home);
+    assert!(ok, "connect failed: {e}");
+
+    let (stdout, stderr, ok) = run(
+        &[
+            "@pg",
+            "--format",
+            "table",
+            "-e",
+            "select 7 as answer, null as n, 'x' as s",
+        ],
+        &[],
+        &home,
+    );
+    assert!(ok, "pg select failed: {stderr}");
+    assert!(stdout.contains('7'), "missing value: {stdout}");
+    assert!(stdout.contains("(null)"), "NULL not distinct: {stdout}");
+    assert!(!stdout.contains(SMCUP) && !stderr.contains(SMCUP), "emitted alt-screen escape!");
+}
+
 #[test]
 fn readonly_profile_blocks_writes() {
     let home = unique_dir("ro");
