@@ -150,10 +150,14 @@ the plan below front-loads that shared core and orders everything by value-per-e
     renders → `:wq` → readback; forced highlight → rgb fg decoded) **and** a pty
     drive asserting **no smcup** with the result printed to scrollback.
   - **M3 (in progress):** ✅ bracketed paste → `nvim_paste` (clean multi-line
-    paste, verified via pty) · ✅ width-resize follow. Note: popup-menu / cmdline /
-    messages already render in-grid because we use single-grid `ext_linegrid`
-    (no externalised UI), so no overlays needed. Remaining: mouse
-    (`nvim_input_mouse`), cursor-shape (`mode_change`), broader special-key coverage.
+    paste) · ✅ width-resize follow · ✅ cursor-shape from `mode_change` (bar in
+    insert, block in normal, underline in replace) · ✅ **clean buffer** — the
+    scratch opens with zero header text; the active connection + key hints are a
+    dim *virtual line* (extmark, `virt_lines`) that isn't buffer content, so it's
+    never saved or run. All verified via pty/headless. Note: popup-menu / cmdline /
+    messages already render in-grid (single-grid `ext_linegrid`), so no overlays
+    needed. Remaining: mouse (`nvim_input_mouse` — deferred; inline-viewport
+    coordinate mapping needs care) and broader special-key coverage.
 
 - ✅ **Ad-hoc connection URLs** — `nsql postgres://user:pass@host/db [-e …]` connects
   to an unsaved, one-off database (a leading DB-URL positional is pulled out before

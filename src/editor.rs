@@ -17,12 +17,12 @@ use crate::util::{self, EditorKind};
 use anyhow::{Context, Result};
 use std::process::Command;
 
-/// Header lines (as SQL comments) shown at the top of the scratch buffer. They
-/// are stripped before the query runs and before it is echoed.
-pub(crate) fn header(profile: &Profile) -> String {
+/// A one-line, secret-free status (active profile + redacted url). Passed to the
+/// editor via $NSQL_STATUS and shown as *virtual text* above the buffer — never
+/// as buffer content, so the editing area stays clean.
+pub(crate) fn status_line(profile: &Profile) -> String {
     format!(
-        "-- nsql \u{b7} profile: {} \u{b7} {}\n\
-         -- ,, = run     ,q = cancel     (or :wq to run, :cq to cancel)\n",
+        "nsql \u{b7} {} \u{b7} {}",
         profile.name,
         util::redact_url(&profile.url)
     )
@@ -45,13 +45,16 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
 
     let scratch = paths.scratch_for(&profile.name);
     let prior = std::fs::read_to_string(&scratch).unwrap_or_default();
-    let initial = format!("{}{}", header(profile), strip_header(&prior));
+    // Clean buffer: just the prior scratch (strip_header also scrubs any legacy
+    // header lines from scratch files written by older versions).
+    let initial = strip_header(&prior);
 
     let tmp = util::secure_tempfile("nsql", "sql")?;
     std::fs::write(&tmp, &initial).with_context(|| format!("writing {}", tmp.display()))?;
 
     let (program, kind) = util::resolve_editor()?;
     let mut cmd = Command::new(&program);
+    cmd.env("NSQL_STATUS", status_line(profile));
     match kind {
         EditorKind::Nvim => {
             cmd.arg("-i")
@@ -121,17 +124,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_is_stripped() {
-        let prof = Profile {
-            name: "local".into(),
-            url: "sqlite::memory:".into(),
-            prod: false,
-            readonly: false,
-            no_history: false,
-        };
-        let buf = format!("{}select 1;\n", header(&prof));
-        let body = strip_header(&buf);
-        assert!(!body.contains("nsql \u{b7} profile"));
+    fn legacy_header_is_stripped() {
+        // Scratch files written by older versions may still carry the header;
+        // strip_header must scrub it so the buffer opens clean.
+        let legacy = "-- nsql \u{b7} profile: x \u{b7} url\n\
+                      -- ,, = run     ,q = cancel\n\
+                      select 1;\n";
+        let body = strip_header(legacy);
+        assert!(!body.contains("nsql"));
         assert!(body.contains("select 1;"));
     }
 }

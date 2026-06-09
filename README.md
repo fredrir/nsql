@@ -79,14 +79,17 @@ The async machinery (tokio/ratatui/nvim-rs) lives entirely in `src/embed.rs`
 behind the `embed-editor` feature (on by default). For a leaner, fully-sync build
 without it, use `cargo build --no-default-features` (then `nsql` uses Mode 1).
 
+The scratch buffer opens **fully clean** — the active connection + key hints show
+as a dim *virtual line* above it (not buffer text, so never saved or run).
+
 **Status:** verified end-to-end against real nvim (no smcup; type/paste → `:wq` →
 result in scrollback). Done: **M1** (loop, input, exit/readback), **M2**
 (syntax-highlight colors via `hl_attr_define`/`default_colors_set`), and **M3 so
-far** (bracketed paste → `nvim_paste` for clean multi-line paste; width-resize).
-Remaining M3 polish: mouse (`nvim_input_mouse`), cursor-shape (`mode_change`), and
-broader special-key coverage. Completion popup / cmdline / messages already render
-in-grid (single-grid `ext_linegrid`). Falls back to Mode 1 automatically when
-there's no terminal (e.g. `--edit` while piping).
+far** (bracketed paste → `nvim_paste` for clean multi-line paste; width-resize;
+cursor-shape from `mode_change`; clean buffer). Remaining M3: mouse
+(`nvim_input_mouse`) and broader special-key coverage. Completion popup / cmdline /
+messages already render in-grid (single-grid `ext_linegrid`). Falls back to Mode 1
+automatically when there's no terminal (e.g. `--edit` while piping).
 
 ## Commands
 

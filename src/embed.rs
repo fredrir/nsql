@@ -24,6 +24,7 @@ use nvim_rs::{Handler, Neovim, UiAttachOptions, Value};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
 };
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::layout::Position;
@@ -45,7 +46,8 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
     editor::write_inject(paths)?;
     let scratch = paths.scratch_for(&profile.name);
     let prior = std::fs::read_to_string(&scratch).unwrap_or_default();
-    let initial = format!("{}{}", editor::header(profile), editor::strip_header(&prior));
+    // Clean buffer: just the prior scratch (strip_header scrubs any legacy header).
+    let initial = editor::strip_header(&prior);
 
     let tmp = util::secure_tempfile("nsql", "sql")?;
     std::fs::write(&tmp, &initial).with_context(|| format!("writing {}", tmp.display()))?;
@@ -56,7 +58,7 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
         .build()
         .context("starting embed runtime")?;
 
-    let exit_code = rt.block_on(run_session(paths, &tmp));
+    let exit_code = rt.block_on(run_session(paths, &tmp, &editor::status_line(profile)));
     // Always restore the terminal, whatever happened.
     let _ = disable_raw_mode();
     let exit_code = exit_code?;
@@ -78,14 +80,15 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
 }
 
 /// Drive the embedded nvim and return its process exit code.
-async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
+async fn run_session(paths: &Paths, tmp: &std::path::Path, status: &str) -> Result<i32> {
     let (cols, rows) = util::term_size();
     let height = rows.saturating_sub(2).clamp(3, 24);
     let width = cols.max(20);
 
     // Spawn `nvim --embed` on the temp file, with our buffer-local keymaps.
     let mut cmd = Command::new("nvim");
-    cmd.arg("--embed")
+    cmd.env("NSQL_STATUS", status)
+        .arg("--embed")
         .arg("-n")
         .arg("-i")
         .arg("NONE")
@@ -149,6 +152,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
     .context("creating inline terminal")?;
 
     let mut grid = Grid::new(width as usize, height as usize);
+    let mut last_shape = Shape::Block;
 
     let code: i32 = loop {
         // Drain all pending redraws (non-blocking) so the grid is current, then
@@ -161,6 +165,16 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
         }
         if dirty {
             draw(&mut terminal, &grid);
+        }
+        // Match the terminal cursor shape to nvim's mode (bar in insert, etc.).
+        if grid.shape != last_shape {
+            last_shape = grid.shape;
+            let style = match grid.shape {
+                Shape::Bar => SetCursorStyle::SteadyBar,
+                Shape::Underline => SetCursorStyle::SteadyUnderScore,
+                Shape::Block => SetCursorStyle::SteadyBlock,
+            };
+            let _ = execute!(std::io::stdout(), style);
         }
 
         // Keys are listed BEFORE redraws in this biased select so a continuous
@@ -199,7 +213,11 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path) -> Result<i32> {
     };
 
     shutdown.store(true, Ordering::Relaxed);
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        SetCursorStyle::DefaultUserShape
+    );
     let _ = terminal.clear(); // wipe the inline viewport; results print below
     Ok(code)
 }
@@ -352,6 +370,14 @@ struct Attr {
     reverse: bool,
 }
 
+/// Terminal cursor shape, mirrored from nvim's current mode.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    Block,
+    Bar,
+    Underline,
+}
+
 struct Grid {
     w: usize,
     h: usize,
@@ -360,6 +386,7 @@ struct Grid {
     hl: HashMap<u16, Attr>,
     def_fg: Option<u32>,
     def_bg: Option<u32>,
+    shape: Shape,
 }
 
 impl Grid {
@@ -372,6 +399,7 @@ impl Grid {
             hl: HashMap::new(),
             def_fg: None,
             def_bg: None,
+            shape: Shape::Block,
         }
     }
     fn resize(&mut self, w: usize, h: usize) {
@@ -421,6 +449,18 @@ fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
                 "hl_attr_define" => {
                     if let Some((id, attr)) = parse_hl(p) {
                         grid.hl.insert(id, attr);
+                    }
+                }
+                "mode_change" => {
+                    // [mode (str), mode_idx]
+                    if let Some(mode) = p.first().and_then(|v| v.as_str()) {
+                        grid.shape = if mode.contains("insert") {
+                            Shape::Bar
+                        } else if mode.contains("replace") {
+                            Shape::Underline
+                        } else {
+                            Shape::Block
+                        };
                     }
                 }
                 _ => {}
@@ -675,6 +715,27 @@ mod tests {
             file.contains("SELECT 42;"),
             "buffer was not written back on :wq: {file:?}"
         );
+    }
+
+    #[test]
+    fn mode_change_sets_cursor_shape() {
+        let mut g = Grid::new(4, 1);
+        apply_redraw(
+            &mut g,
+            &[Value::Array(vec![
+                Value::from("mode_change"),
+                Value::Array(vec![Value::from("insert"), Value::from(1)]),
+            ])],
+        );
+        assert!(matches!(g.shape, Shape::Bar));
+        apply_redraw(
+            &mut g,
+            &[Value::Array(vec![
+                Value::from("mode_change"),
+                Value::Array(vec![Value::from("normal"), Value::from(0)]),
+            ])],
+        );
+        assert!(matches!(g.shape, Shape::Block));
     }
 
     /// Prove the M2 color pipeline against real nvim: force a concrete Normal
