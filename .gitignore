@@ -1,0 +1,5 @@
+/target
+# Cargo.lock is committed for this binary crate (reproducible builds).
+*.db
+*.sqlite
+*.sqlite-*
