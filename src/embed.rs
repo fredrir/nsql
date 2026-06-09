@@ -137,6 +137,9 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
 
     enable_raw_mode().context("enabling raw mode")?;
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // Restores the terminal even on a panic unwind, so a crash never leaves the
+    // shell in raw mode with a corrupted prompt.
+    let _term_guard = TermGuard;
     let shutdown = Arc::new(AtomicBool::new(false));
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
     {
@@ -242,13 +245,23 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     }
 
     shutdown.store(true, Ordering::Relaxed);
-    let _ = execute!(
-        std::io::stdout(),
-        DisableBracketedPaste,
-        SetCursorStyle::DefaultUserShape
-    );
-    let _ = terminal.clear(); // wipe nsql's region; main scrollback is untouched
+    let _ = terminal.clear(); // wipe nsql's region; _term_guard restores the terminal
     Ok(())
+}
+
+/// RAII restore of the terminal (raw mode, bracketed paste, cursor shape) — runs
+/// on a normal return AND during a panic unwind, so a crash never leaves the
+/// shell in raw mode with a corrupted prompt.
+struct TermGuard;
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            SetCursorStyle::DefaultUserShape
+        );
+        let _ = disable_raw_mode();
+    }
 }
 
 /// Execute one query and update the results pane. Never propagates an error out
@@ -277,7 +290,7 @@ fn run_query(
     draw_session(terminal, grid, editor_rows, results_rows, results);
 
     let started = std::time::Instant::now();
-    let outcome = db::guard(profile, sql, force, false).and_then(|_| db::run(profile, sql, all));
+    let outcome = run_blocking(profile, sql, force, all);
     match outcome {
         Ok(result) => {
             let table_opts = render::Options {
@@ -307,6 +320,19 @@ fn run_query(
         }
     }
     draw_session(terminal, grid, editor_rows, results_rows, results);
+}
+
+/// Run guard+query OFF the async runtime. The sync `postgres` crate spins its
+/// OWN tokio runtime and `block_on`s it; calling that from inside the embed
+/// runtime panics with "Cannot start a runtime from within a runtime". A scoped
+/// OS thread isn't driving our runtime, so the nested block_on is fine. (rusqlite
+/// is pure-sync and unaffected, but this routes all backends uniformly.)
+fn run_blocking(profile: &Profile, sql: &str, force: bool, all: bool) -> Result<db::QueryResult> {
+    std::thread::scope(|s| {
+        s.spawn(|| db::guard(profile, sql, force, false).and_then(|_| db::run(profile, sql, all)))
+            .join()
+            .unwrap_or_else(|_| Err(anyhow!("the query thread panicked")))
+    })
 }
 
 fn first_line(s: &str) -> String {
@@ -991,6 +1017,26 @@ mod tests {
             "no rgb foreground decoded from redraw stream (def_fg={:?})",
             captured.1
         );
+    }
+
+    #[test]
+    fn postgres_in_session_does_not_nested_runtime_panic() {
+        // Reproduce the embed runtime context: running a Postgres query from
+        // inside our tokio runtime must NOT panic with "runtime within a runtime".
+        // Against an unreachable port it should simply return a connection error.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let prof = crate::config::Profile {
+            name: "t".into(),
+            url: "postgres://u@127.0.0.1:1/nope".into(),
+            prod: false,
+            readonly: false,
+            no_history: false,
+        };
+        let r = rt.block_on(async { run_blocking(&prof, "select 1", false, false) });
+        assert!(r.is_err(), "expected a connection error, not a panic/Ok");
     }
 
     fn grid_has(g: &Grid, needle: &str) -> bool {
