@@ -117,6 +117,28 @@ real nvim) and the clamps above cover them anyway.
   investment: abstract the terminal + input behind traits so the full session loop
   gets a deterministic integration test; the pty drives stay as manual dev checks.)
 
+## Unintrusive-UI cleanup
+
+- ✅ Status moved into **nvim's native statusline** (the bar at the bottom of the
+  editor window, which also serves as the **divider** above the results pane);
+  shows the redacted connection, **prod in red**, and the key hints. Replaces the
+  virtual-text line.
+- ✅ Hidden noise: the temp-file path and `"… N lines written"` (`shortmess+=WF`),
+  the `(no results yet)` placeholder, and the `capped at N rows` stderr message
+  that was corrupting the inline view (folded into a compact row-count footer).
+- ✅ Exit-persist **bounded** to ~a screenful so the user's prior work stays
+  visible above the persisted result.
+
+### Next: results in a real nvim buffer (the bigger pivot)
+
+Two asks need the results to live in a **second nvim window/buffer** rather than an
+nsql-drawn pane: (7) **type-aware highlighting** (ints/dates/strings/NULL coloured
+by type, via per-cell extmark `hl_group`s); (8) **navigate the table the native nvim
+way** (move between editor and results windows, `hjkl`, visual select) with **clean
+copy** (yank yields the values, not the box-drawing chars — borderless/aligned, or
+column separators as virtual text). This makes nsql render only nvim's grid (nvim
+owns the split + statusline), which is also simpler. Deferred as a focused step.
+
 ## Build order (friction-removed-per-effort)
 
 - **Step 0 — `render::format()` extraction** *(no behavior change; enables everything)*.

@@ -91,15 +91,17 @@ enum RunMsg {
 async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) -> Result<()> {
     let (cols, rows) = util::term_size();
     let width = cols.max(20);
-    // Split the inline region: editor on top, a results pane on the bottom,
-    // with a 1-row separator. The scrollback ABOVE is never touched.
+    // Split the inline region: editor on top (its last row is nvim's own
+    // statusline, which serves as the divider + status bar), results pane on the
+    // bottom. The scrollback ABOVE is never touched.
     let total = rows.saturating_sub(2).clamp(8, 30);
     let results_rows = (total / 2).clamp(4, 12);
-    let editor_rows = total.saturating_sub(results_rows + 1).max(3);
-    let view_h = editor_rows + 1 + results_rows;
+    let editor_rows = total.saturating_sub(results_rows).max(3);
+    let view_h = editor_rows + results_rows;
 
     let mut cmd = Command::new("nvim");
     cmd.env("NSQL_STATUS", editor::status_line(profile))
+        .env("NSQL_PROD", if profile.prod { "1" } else { "0" })
         .env_remove("PGPASSWORD") // don't leak a secret into the editor's env
         .arg("--embed")
         .arg("-n")
@@ -178,7 +180,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     let mut grid = Grid::new(width as usize, editor_rows as usize);
     let mut last_shape = Shape::Block;
     let mut results: Vec<String> =
-        vec!["  (no results yet · ,r run · ,y copy · ,, quit)".to_string()];
+        Vec::new();
     let mut result_tsv: Option<String> = None;
     // The last successful result, rendered with its query — printed into the
     // user's scrollback on exit so the answer stays in context with their work.
@@ -314,8 +316,18 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     // context with the user's main work after nsql exits (insert_before pushes it
     // ABOVE the inline region, which we then clear).
     if let Some(block) = &last_persist {
-        let lines: Vec<Line> = block.lines().map(|l| Line::from(l.to_string())).collect();
-        let h = (lines.len() as u16).clamp(1, 400);
+        // Bounded: persist at most a screenful-ish so the user's prior work stays
+        // visible above it. A bigger result was on screen during the session and
+        // is reachable via re-run / -e.
+        const MAX_PERSIST: usize = 18;
+        let mut src: Vec<String> = block.lines().map(|l| l.to_string()).collect();
+        if src.len() > MAX_PERSIST {
+            let more = src.len() - (MAX_PERSIST - 1);
+            src.truncate(MAX_PERSIST - 1);
+            src.push(format!("-- … {more} more rows (re-run, or `nsql -e` to pipe)"));
+        }
+        let lines: Vec<Line> = src.into_iter().map(Line::from).collect();
+        let h = lines.len() as u16;
         let _ = terminal.insert_before(h, move |buf| {
             use ratatui::widgets::Widget;
             Paragraph::new(Text::from(lines)).render(buf.area, buf);
@@ -509,9 +521,9 @@ fn translate_key(k: KeyEvent) -> Option<String> {
     }
 }
 
-/// Render the split inline region: nvim editor (top `editor_rows`), a separator,
-/// then the results pane (bottom `results_rows`). The scrollback above is never
-/// touched.
+/// Render the inline region: the nvim editor grid (top `editor_rows`, whose last
+/// row is nvim's own statusline = the divider + status bar), then the results
+/// pane (bottom `results_rows`). The scrollback above is never touched.
 fn draw_session(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     grid: &Grid,
@@ -524,30 +536,22 @@ fn draw_session(
         let w = area.width as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(area.height as usize);
 
-        // Editor: the nvim grid (sized to editor_rows via ui_attach).
+        // Editor grid (its last row is nvim's statusline — the divider/status bar).
         for row in grid.cells.iter().take(editor_rows as usize) {
             lines.push(render_row(grid, row, w));
         }
-        // Separator.
-        lines.push(Line::from(Span::styled(
-            "─".repeat(w),
-            Style::default().fg(Color::DarkGray),
-        )));
         // Results pane (plain text, truncated to width; non-navigable preview).
-        let shown = results_rows.saturating_sub(0) as usize;
+        let shown = results_rows as usize;
         for (i, r) in results.iter().enumerate() {
-            if i >= shown {
-                let more = results.len() - shown + 1;
-                if let Some(last) = lines.last_mut() {
-                    *last = Line::from(Span::styled(
-                        format!("  … +{more} more lines · ,a all · ,y copy"),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
+            if i + 1 >= shown && i + 1 < results.len() {
+                let more = results.len() - i;
+                lines.push(Line::from(Span::styled(
+                    format!("  … +{more} more · ,a all · ,y copy"),
+                    Style::default().fg(Color::DarkGray),
+                )));
                 break;
             }
-            let truncated: String = r.chars().take(w).collect();
-            lines.push(Line::from(truncated));
+            lines.push(Line::from(r.chars().take(w).collect::<String>()));
         }
 
         frame.render_widget(Paragraph::new(Text::from(lines)), area);

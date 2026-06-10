@@ -129,17 +129,15 @@ pub fn format(result: &QueryResult, opts: &Options) -> String {
             }
             let n = rows.len();
             if human {
-                let _ = writeln!(out, "({n} row{}{timing})", if n == 1 { "" } else { "s" });
-                if truncated.is_some() {
-                    let _ = writeln!(
-                        out,
-                        "-- capped at {n} rows; re-run with --all to fetch the rest"
-                    );
-                }
-            } else if truncated.is_some() {
-                // Don't pollute machine output; warn on stderr instead.
-                eprintln!("nsql: capped at {n} rows; re-run with --all for the rest");
+                let suffix = if truncated.is_some() { " (capped, ,a for all)" } else { "" };
+                let _ = writeln!(
+                    out,
+                    "({n} row{}{timing}{suffix})",
+                    if n == 1 { "" } else { "s" }
+                );
             }
+            // NOTE: never write to stderr here — this is a pure formatter, and in
+            // the inline session stderr would corrupt the editor region.
         }
     }
 

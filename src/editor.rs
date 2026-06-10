@@ -57,6 +57,7 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
     // Don't leak a connection secret into the editor's env (its plugins could
     // read it); nsql passes connections to any LSP explicitly, not via PGPASSWORD.
     cmd.env("NSQL_STATUS", status_line(profile))
+        .env("NSQL_PROD", if profile.prod { "1" } else { "0" })
         .env_remove("PGPASSWORD");
     match kind {
         EditorKind::Nvim => {

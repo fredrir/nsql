@@ -94,13 +94,25 @@ pcall(function()
   vim.keymap.set("n", ",q", function() quit("quit") end, o)
 end)
 
--- Show the active connection + key hints as VIRTUAL TEXT above the first line.
--- Not buffer content, so the buffer opens fully clean and the hint is never saved.
+-- Show the active connection + key hints in nvim's NATIVE statusline (the bar at
+-- the bottom of the editor window — which also serves as the divider above the
+-- results pane). Prod connections are red. Also hide the temp-file path and the
+-- "N lines written" noise (where the scratch lives is not useful info).
 pcall(function()
+  vim.opt.shortmess:append("WFI") -- no "written", no file-info intro, no intro
+  vim.o.laststatus = 2 -- ensure the statusline (divider) is always shown
+  vim.o.ruler = false
+
   local status = vim.env.NSQL_STATUS or "nsql"
-  local ns = vim.api.nvim_create_namespace("nsql")
-  vim.api.nvim_buf_set_extmark(0, ns, 0, 0, {
-    virt_lines_above = true,
-    virt_lines = { { { status .. "   ·   ,r run · ,y copy · ,, quit", "Comment" } } },
-  })
+  local prod = vim.env.NSQL_PROD == "1"
+  local function esc(s)
+    return (s:gsub("%%", "%%%%")) -- % is special in 'statusline'
+  end
+  local keys = ",r run  ,y copy  ,, quit "
+  if prod then
+    pcall(vim.api.nvim_set_hl, 0, "NsqlProd", { fg = "#ff5555", bold = true })
+    vim.wo.statusline = "%#NsqlProd# PROD %* " .. esc(status) .. "%=" .. esc(keys)
+  else
+    vim.wo.statusline = " " .. esc(status) .. "%=" .. esc(keys)
+  end
 end)
