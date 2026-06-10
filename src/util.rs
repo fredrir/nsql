@@ -172,10 +172,7 @@ pub fn url_password(url: &str) -> Option<String> {
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("nsql");
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("nsql");
     for _ in 0..16 {
         let tmp = dir.join(format!(".{name}.{}.tmp", rand_token()));
         match OpenOptions::new()
@@ -212,6 +209,13 @@ pub fn term_size() -> (u16, u16) {
     }
 }
 
+pub fn url_has_password(url: &str) -> bool {
+    url.split_once("://")
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .map(|(userinfo, _)| userinfo.contains(':'))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +228,10 @@ mod tests {
         );
         // no password -> unchanged
         assert_eq!(redact_url("sqlite:///x/y.db"), "sqlite:///x/y.db");
-        assert_eq!(redact_url("postgres://joe@host/db"), "postgres://joe@host/db");
+        assert_eq!(
+            redact_url("postgres://joe@host/db"),
+            "postgres://joe@host/db"
+        );
     }
 
     #[test]

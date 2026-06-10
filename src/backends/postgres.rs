@@ -12,7 +12,7 @@
 
 use crate::config::Profile;
 use crate::db::{first_keyword, Cell, QueryResult, ROW_CAP};
-use crate::util;
+use crate::util::{self, url_has_password};
 use anyhow::{Context, Result};
 use postgres::SimpleQueryMessage;
 use std::str::FromStr;
@@ -35,9 +35,7 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
     // Bound a runaway query (cartesian join, scan of a huge table) server-side.
     let _ = client.simple_query("SET statement_timeout = '30s'");
 
-    let messages = client
-        .simple_query(sql.trim())
-        .context("executing SQL")?;
+    let messages = client.simple_query(sql.trim()).context("executing SQL")?;
 
     let cap = if all { usize::MAX } else { ROW_CAP };
     let mut columns: Vec<String> = Vec::new();
@@ -51,11 +49,7 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
             SimpleQueryMessage::Row(row) => {
                 saw_row = true;
                 if columns.is_empty() {
-                    columns = row
-                        .columns()
-                        .iter()
-                        .map(|c| c.name().to_string())
-                        .collect();
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
                 }
                 if rows.len() >= cap {
                     if truncated.is_none() {
@@ -96,11 +90,4 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
             changes: affected.unwrap_or(0) as usize,
         })
     }
-}
-
-fn url_has_password(url: &str) -> bool {
-    url.split_once("://")
-        .and_then(|(_, rest)| rest.split_once('@'))
-        .map(|(userinfo, _)| userinfo.contains(':'))
-        .unwrap_or(false)
 }
