@@ -33,10 +33,11 @@ echo "select 'hi' as greeting" | ./target/debug/nsql
 
 # the main event: a persistent inline session in your real neovim
 ./target/debug/nsql                # opens nvim; the session stays open
-#   ,r  -> run the statement under the cursor (results in a bottom pane)
-#   :w  -> also previews (runs) without quitting
-#   ,y  -> copy the last result (TSV, via OSC 52)   ,a -> run uncapped
-#   ,R  -> force-run on a prod profile               ,, / ,q -> quit
+#   :w   -> run the statement under the cursor (write = execute; :wq runs + quits)
+#   q    -> toggle into the results window (hjkl to move, y to copy clean values)
+#   ,a   -> run uncapped       ,R -> force-run on a prod profile
+#   ,j   -> copy result as JSON (OSC 52)        ,c -> as CSV
+#   :q :wq :q! ZZ -> quit, the native way (buffer saved for next time)
 ```
 
 On first run it bootstraps a `local` SQLite profile (a `dev.db` under your data
@@ -79,29 +80,32 @@ Because the results are a **real nvim buffer**, you get all of nvim for free:
 - **Type-aware colours** — integers, dates, booleans, strings and NULL are each
   painted by *value* (so Postgres text columns colour correctly too), via per-cell
   extmarks that resolve to your colorscheme.
-- **Native navigation** — `,o` (or `<C-w>j`) hops into the results window; move with
-  `hjkl`, visual-select, search — it's just a buffer. `q` / `<Esc>` hop back.
+- **Native navigation** — `q` (or `<C-w>j`) toggles into the results window; move with
+  `hjkl`, visual-select, search — it's just a buffer. `q` / `<Esc>` toggle back.
 - **Clean copy** — the table is borderless/aligned, so a yank copies the **values**,
   not box-drawing chars. Any yank there also mirrors to your system clipboard via
   OSC 52 (works over SSH, no `clipboard` setting needed).
 
 The editor uses your **terminal's own background** (only distinct highlights, like a
-selection, paint over it), so it blends in. **nvim's native statusline** shows the
-active connection and is the divider above the results — **prod connections render in
-red**. The temp-file path and "written" noise are hidden.
+selection, paint over it), so it blends in. **nvim's native statuslines** carry the
+context: the editor's bar shows the connection (**prod in red**) and is the divider
+above the results; once a result shows, that bar becomes a **sticky column header**
+(pinned above the scrolling rows) and the connection moves to the bottom bar. The
+temp-file path and "written" noise are hidden.
 
-The session stays open and runs queries on demand:
+**Native-first keys** — plain run / copy / quit are the vim verbs you already use;
+custom `,`-keys are reserved for *features* (run-variants, exports):
 
-- `,r` runs the **statement under the cursor**; `:w` also previews. The result lands
-  in the bottom window — your scrollback above is never touched, so you keep an eye
-  on your main task. A slow query runs in the background with a live `running… Ns`
-  spinner (the editor never freezes).
-- **On quit, the last result is left in your scrollback** (the query + table,
-  bounded to ~a screenful so your prior work stays visible above it), so the answer
-  stays in context with your work — the whole point of a sidetrack tool.
-- `,y` copies the whole last result as TSV (OSC 52). `,a` runs uncapped.
-- `,R` force-runs on a prod-tagged profile (otherwise destructive statements are
-  refused in-session). `,,` / `,q` quit (your buffer is saved for next time).
+- **`:w` runs** the statement under the cursor (write = execute); `:wq` runs + quits.
+  The result lands in the bottom window — your scrollback above is never touched. A
+  slow query runs in the background with a live `running… Ns` spinner (never freezes).
+- **`:q` / `:wq` / `:q!` / `ZZ` quit** the whole session, the native way (your buffer
+  is saved for next time). **`q`** toggles between the editor and the results window.
+- **`,a`** runs uncapped; **`,R`** force-runs on a prod-tagged profile (otherwise
+  destructive statements are refused in-session). **`,j`** / **`,c`** copy the last
+  result as JSON / CSV (OSC 52). Copy a value with a native yank in the results window.
+- **On quit, the last result is left in your scrollback** (the query + table, bounded
+  to ~a screenful so your prior work stays visible above it).
 - Errors render in the results buffer; the session keeps going.
 
 ```sh
@@ -113,22 +117,23 @@ The async machinery (tokio/ratatui/nvim-rs) lives entirely in `src/embed.rs`
 behind the `embed-editor` feature (on by default). For a leaner, fully-sync build
 without it, use `cargo build --no-default-features` (then `nsql` uses Mode 1).
 
-The scratch buffer opens **fully clean** — the active connection + key hints show
-as a dim *virtual line* above it (not buffer text, so never saved or run).
+The scratch buffer opens **fully clean** — the active connection lives in nvim's
+statusline, not in the buffer, so it is never saved or run.
 
-**Status:** verified end-to-end against real nvim (no smcup; `,r` runs → result in
-the bottom pane; `,y` copies via OSC 52; scrollback above untouched). Editor
-features done: color highlights, bracketed paste, width-resize, cursor-shape, clean
-buffer, and the run-without-quit results pane. Remaining: mouse
-(`nvim_input_mouse`), broader special keys, and the daily-driver ergonomics in
-ERGONOMICS.md (recents-resume, the 2-flag CLI, query tabs, schema completion). Falls
+**Status:** verified end-to-end against real nvim (no smcup; `:w` runs → result in a
+real nvim buffer with type colours; `q` toggles in, a native yank copies clean values
+via OSC 52; `:q`/`:wq` quit; scrollback above untouched). Editor features done: color
+highlights, bracketed paste, width-resize, cursor-shape, clean buffer, the
+type-coloured navigable results buffer, sticky-header bars, and JSON/CSV export.
+Remaining: mouse (`nvim_input_mouse`), broader special keys, and the daily-driver
+ergonomics in ERGONOMICS.md (the 2-flag CLI, query tabs, schema completion). Falls
 back to Mode 1 automatically when there's no terminal (e.g. `--edit` while piping).
 
 ## Commands
 
 | Command | What |
 |---|---|
-| `nsql` | open the zero-flash persistent session (`,r` run · `,o` into results · `,y` copy · `,,` quit) |
+| `nsql` | open the zero-flash persistent session (`:w` run · `q` into results · `,j` json · `:wq` quit) |
 | `nsql --classic` | use the classic transient-child editor (Mode 1) instead |
 | `nsql --edit` | force the editor even when piping |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |

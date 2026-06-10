@@ -60,6 +60,18 @@ fn real_main() -> Result<()> {
     // profile) > -p/@name > resume the most-recent > the bootstrapped `local`.
     let profile = if let Some(t) = &target {
         if is_db_url(t) {
+            // An inline password in an ad-hoc URL would be lost on resume: recents
+            // stores the URL WITHOUT it (no plaintext on disk). Migrate it into the
+            // OS keyring, keyed on the stable user@host:port/db identity, so bare
+            // `nsql` reconnects. The full URL stays in this session's profile so the
+            // current connection still works immediately.
+            if let Some(pw) = util::url_password(t) {
+                if let Some(key) = creds::pg_identity(t).map(|id| creds::identity_key(&id)) {
+                    if let Err(e) = secrets::set(&key, &pw) {
+                        eprintln!("nsql: note: couldn't save the password for resume: {e:#}");
+                    }
+                }
+            }
             Profile {
                 name: adhoc_name(t),
                 url: t.clone(),

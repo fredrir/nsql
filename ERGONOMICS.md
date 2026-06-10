@@ -147,7 +147,32 @@ statuslines). This delivered:
 Verified end-to-end on real nvim (pty + headless): the split renders, values +
 headers + footer show, the connection statusline divides, the extmark hl groups land,
 and `yy` emits a clean OSC-52 payload. Bounded at 2000 on-screen rows (extmark cap;
-the full result is still `,y`-copyable / re-runnable).
+the full result is still exportable / re-runnable).
+
+### ✅ Native-first keymap + sticky-header bars (done)
+
+"Plain run / copy / quit are the vim verbs you already use; custom `,`-keys are for
+*features*." So:
+
+- **Run = `:w`** (write = execute; `:wq` runs + quits). **Quit = native** `:q` / `:wq`
+  / `:q!` / `ZZ` — the results split auto-closes when it's the last window (quickfix
+  pattern), so quitting the editor exits nvim. **Copy = native yank** in the results
+  window. Dropped `,r` / `,y` / `,,` / `,q` / `,o`.
+- **`q` toggles** between the editor and the results window (both directions).
+- Custom keys are now exports + run-variants: **`,j`** (JSON) / **`,c`** (CSV) copy the
+  last result via OSC 52; **`,a`** (all rows) / **`,R`** (force on prod).
+- **Sticky-header bars** (`WRITE_RESULTS_LUA` role-shift): with a result on screen the
+  editor's statusline becomes the column **header**, pinned above the scrolling rows
+  and aligned to the same columns; the connection moves to the bottom bar. With no
+  result, the connection is the editor's bar (prod in red).
+
+### ✅ Bug: inline ad-hoc passwords now survive resume
+
+`nsql postgres://user:pw@host/db` used to connect fine but break on bare-`nsql`
+resume — recents stores the URL *without* the password (no plaintext on disk) and the
+password was never saved. Now an inline password is migrated into the OS keyring
+(keyed on `user@host:port/db`, like `connect`), so resume's `resolve_password` finds
+it. The session's own profile keeps the full URL so the current connection still works.
 
 ## Build order (friction-removed-per-effort)
 

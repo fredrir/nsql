@@ -87,7 +87,9 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<()> {
 /// A request from inside nvim (via rpcnotify) to act on the session.
 enum RunMsg {
     Run { sql: String, force: bool, all: bool },
-    Copy,
+    /// Copy the last result in a structured format (`json` / `csv`) to the
+    /// clipboard — the custom-key surface for *export* features.
+    Export(String),
     /// Text yanked inside the results buffer — mirror it to the system clipboard
     /// (OSC 52) so a native visual-select+`y` copies clean values everywhere.
     Yank(String),
@@ -199,7 +201,9 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
 
     let mut grid = Grid::new(width as usize, view_h as usize);
     let mut last_shape = Shape::Block;
-    let mut result_tsv: Option<String> = None;
+    // Last result pre-rendered for the export keys (,j / ,c).
+    let mut result_json: Option<String> = None;
+    let mut result_csv: Option<String> = None;
     // The last successful result, rendered with its query — printed into the
     // user's scrollback on exit so the answer stays in context with their work.
     let mut last_persist: Option<String> = None;
@@ -239,21 +243,21 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                 match msg {
                     RunMsg::Run { sql, force, all } => {
                         if in_flight.is_some() {
-                            write_results(&nvim, rbuf, &["  a query is already running…".to_string()], &[]).await;
+                            write_results(&nvim, rbuf, "", &["  a query is already running…".to_string()], &[]).await;
                         } else if db::strip_sql_comments(&sql).trim().is_empty() {
-                            write_results(&nvim, rbuf, &["  (nothing to run)".to_string()], &[]).await;
+                            write_results(&nvim, rbuf, "", &["  (nothing to run)".to_string()], &[]).await;
                         } else {
                             // guard is fast (no I/O); only the query itself is offloaded.
                             match db::guard(profile, &sql, force, false) {
                                 Err(e) => {
                                     let msg = format!("  error: {}", first_line(&format!("{e:#}")));
                                     let mark = CellMark { line: 0, col: 0, end: msg.len(), hl: "ErrorMsg" };
-                                    write_results(&nvim, rbuf, &[msg], &[mark]).await;
+                                    write_results(&nvim, rbuf, "", &[msg], &[mark]).await;
                                 }
                                 Ok(()) => {
                                     let started = std::time::Instant::now();
                                     in_flight = Some(started);
-                                    write_results(&nvim, rbuf, &[format!("  running: {}…", first_line(&sql))], &[]).await;
+                                    write_results(&nvim, rbuf, "", &[format!("  running: {}…", first_line(&sql))], &[]).await;
                                     let p = profile.clone();
                                     let tx = qdone_tx.clone();
                                     tokio::task::spawn_blocking(move || {
@@ -264,11 +268,12 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                             }
                         }
                     }
-                    // ,y from the editor: copy the last result WITHOUT disturbing
-                    // the buffer view (the result stays on screen, navigable).
-                    RunMsg::Copy => {
-                        if let Some(tsv) = &result_tsv {
-                            osc52_copy(tsv);
+                    // ,j / ,c from the editor: copy the last result as JSON / CSV
+                    // WITHOUT disturbing the buffer view (the result stays on screen).
+                    RunMsg::Export(fmt) => {
+                        let data = if fmt == "csv" { result_csv.as_deref() } else { result_json.as_deref() };
+                        if let Some(d) = data {
+                            osc52_copy(d);
                         }
                     }
                     // Native visual-select + y inside the results buffer → clipboard.
@@ -278,11 +283,12 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
             // A query finished (on the blocking pool) — render it into the buffer.
             Some((res, started, sql)) = qdone_rx.recv() => {
                 in_flight = None;
-                let (lines, marks) = format_for_buffer(&res);
-                write_results(&nvim, rbuf, &lines, &marks).await;
+                let (header, lines, marks) = format_for_buffer(&res);
+                write_results(&nvim, rbuf, &header, &lines, &marks).await;
                 let outcome = render_outcome(&res, &sql, started.elapsed());
-                if outcome.tsv.is_some() {
-                    result_tsv = outcome.tsv;
+                if outcome.json.is_some() {
+                    result_json = outcome.json;
+                    result_csv = outcome.csv;
                 }
                 if outcome.persist.is_some() {
                     last_persist = outcome.persist;
@@ -300,10 +306,10 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                     let f = SPIN[spin_i % SPIN.len()];
                     spin_i = spin_i.wrapping_add(1);
                     let line = format!(
-                        "  {f} running… {:.1}s   (,q to abandon and quit)",
+                        "  {f} running… {:.1}s   (:q to abandon and quit)",
                         started.elapsed().as_secs_f64()
                     );
-                    write_results(&nvim, rbuf, &[line], &[]).await;
+                    write_results(&nvim, rbuf, "", &[line], &[]).await;
                 }
             }
             Some(ev) = key_rx.recv() => {
@@ -358,27 +364,25 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     Ok(())
 }
 
-/// Side outputs for a finished query: the full result as TSV (for `,y` copy) and
-/// the bordered block to leave in scrollback on exit. The on-screen result itself
-/// is rendered separately by [`format_for_buffer`] into the nvim results buffer.
-/// Pure — unit-testable without nvim or a tty.
+/// Side outputs for a finished query: the result pre-rendered as JSON and CSV (for
+/// the `,j` / `,c` export keys) and the bordered block to leave in scrollback on
+/// exit. The on-screen result itself is rendered separately by [`format_for_buffer`]
+/// into the nvim results buffer. Pure — unit-testable without nvim or a tty.
 struct Outcome {
-    tsv: Option<String>,
+    json: Option<String>,
+    csv: Option<String>,
     persist: Option<String>,
 }
 
 fn render_outcome(res: &Result<db::QueryResult>, sql: &str, elapsed: std::time::Duration) -> Outcome {
+    let fmt = |result, f| {
+        render::format(
+            result,
+            &render::Options { format: f, is_tty: false, echo: None, elapsed: None },
+        )
+    };
     match res {
         Ok(result) => {
-            let tsv = render::format(
-                result,
-                &render::Options {
-                    format: render::Format::Tsv,
-                    is_tty: false,
-                    echo: None,
-                    elapsed: None,
-                },
-            );
             // The persisted block echoes the query (as `-- ` comments) above the
             // table so the scrollback entry is self-describing.
             let persist = render::format(
@@ -391,12 +395,14 @@ fn render_outcome(res: &Result<db::QueryResult>, sql: &str, elapsed: std::time::
                 },
             );
             Outcome {
-                tsv: Some(tsv),
+                json: Some(fmt(result, render::Format::Json)),
+                csv: Some(fmt(result, render::Format::Csv)),
                 persist: Some(persist),
             }
         }
         Err(_) => Outcome {
-            tsv: None,
+            json: None,
+            csv: None,
             persist: None, // keep the last successful result for the exit scrollback
         },
     }
@@ -419,29 +425,34 @@ struct CellMark {
 /// columns (so a native yank copies VALUES, not box-drawing chars) plus per-cell
 /// type highlight marks classified by the value itself (Postgres hands us
 /// everything as text, so colour comes from the content, not just the SQL type).
-fn format_for_buffer(res: &Result<db::QueryResult>) -> (Vec<String>, Vec<CellMark>) {
+///
+/// Returns `(header, lines, marks)`: the column-header row is returned SEPARATELY
+/// (it becomes the editor's statusline — a sticky header pinned above the scrolling
+/// data, aligned to the same columns), so the buffer holds data rows only. `header`
+/// is empty for non-tabular outcomes (error / affected / 0 rows).
+fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec<CellMark>) {
     let result = match res {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("  error: {}", first_line(&format!("{e:#}")));
             let mark = CellMark { line: 0, col: 0, end: msg.len(), hl: "ErrorMsg" };
-            return (vec![msg], vec![mark]);
+            return (String::new(), vec![msg], vec![mark]);
         }
     };
     let (columns, rows, truncated) = match result {
         db::QueryResult::Rows { columns, rows, truncated } => (columns, rows, *truncated),
         db::QueryResult::Affected { changes } => {
-            return (vec![format!("  ✓ OK — {changes} row(s) affected")], Vec::new());
+            return (String::new(), vec![format!("  ✓ OK — {changes} row(s) affected")], Vec::new());
         }
     };
     if columns.is_empty() {
-        return (vec!["  (0 rows)".to_string()], Vec::new());
+        return (String::new(), vec!["  (0 rows)".to_string()], Vec::new());
     }
 
     const MAXW: usize = 60; // cap a single column so one huge cell can't wreck layout
     // Bound the on-screen rows (one extmark per cell): a `,a`/--all query on a
     // huge table mustn't create hundreds of thousands of marks. The full result
-    // is still copyable (`,y`) and re-runnable.
+    // is still exportable (`,j`/`,c`) and re-runnable.
     const MAX_BUF_ROWS: usize = 2000;
     let total = rows.len();
     let rows: &[Vec<db::Cell>] = if total > MAX_BUF_ROWS { &rows[..MAX_BUF_ROWS] } else { rows };
@@ -460,26 +471,23 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (Vec<String>, Vec<CellMar
     }
 
     let sep = "  ";
-    let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 2);
-    let mut marks: Vec<CellMark> = Vec::new();
 
-    // Header row (column names, in the Title colour).
-    {
-        let mut line = String::new();
-        for (i, c) in columns.iter().enumerate() {
-            let shown = truncate_disp(c, widths[i]);
-            let start = line.len();
-            line.push_str(&shown);
-            marks.push(CellMark { line: 0, col: start, end: line.len(), hl: "Title" });
-            push_pad(&mut line, widths[i].saturating_sub(shown.chars().count()));
-            if i + 1 < ncol {
-                line.push_str(sep);
-            }
+    // Header row → the editor statusline (sticky), aligned to the same widths so it
+    // lines up with the data below it.
+    let mut header = String::new();
+    for (i, c) in columns.iter().enumerate() {
+        let shown = truncate_disp(c, widths[i]);
+        header.push_str(&shown);
+        push_pad(&mut header, widths[i].saturating_sub(shown.chars().count()));
+        if i + 1 < ncol {
+            header.push_str(sep);
         }
-        lines.push(line);
     }
 
-    // Data rows.
+    let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+    let mut marks: Vec<CellMark> = Vec::new();
+
+    // Data rows (buffer line 0 = first data row; the header lives in the statusline).
     for (ri, row) in rows.iter().enumerate() {
         let mut line = String::new();
         for i in 0..ncol {
@@ -487,7 +495,7 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (Vec<String>, Vec<CellMar
             let start = line.len();
             line.push_str(&shown);
             marks.push(CellMark {
-                line: ri + 1,
+                line: ri,
                 col: start,
                 end: line.len(),
                 hl: classify(&shown, row.get(i)),
@@ -503,7 +511,7 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (Vec<String>, Vec<CellMar
     // Footer (row count), dim.
     let shown = rows.len();
     let cap = if shown < total {
-        format!(" · showing {shown} of {total} · ,y copies all")
+        format!(" · showing {shown} of {total} · ,j exports all")
     } else if truncated.is_some() {
         " · capped, ,a for all".to_string()
     } else {
@@ -513,7 +521,7 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (Vec<String>, Vec<CellMar
     marks.push(CellMark { line: lines.len(), col: 0, end: footer.len(), hl: "Comment" });
     lines.push(footer);
 
-    (lines, marks)
+    (header, lines, marks)
 }
 
 fn push_pad(s: &mut String, n: usize) {
@@ -601,6 +609,7 @@ fn looks_like_date(s: &str) -> bool {
 async fn write_results(
     nvim: &Neovim<NvimWriter>,
     rbuf: i64,
+    header: &str,
     lines: &[String],
     marks: &[CellMark],
 ) {
@@ -622,12 +631,15 @@ async fn write_results(
             .collect(),
     );
     let _ = nvim
-        .exec_lua(WRITE_RESULTS_LUA, vec![Value::from(rbuf), lines_v, marks_v])
+        .exec_lua(
+            WRITE_RESULTS_LUA,
+            vec![Value::from(rbuf), lines_v, marks_v, Value::from(header)],
+        )
         .await;
 }
 
-/// Lua: create the scratch results buffer + a split window below the editor,
-/// wire native back-to-editor (`q`/`<Esc>`) and clean-yank-to-clipboard. Returns
+/// Lua: create the scratch results buffer + a split window below the editor, wire
+/// native toggle-back-to-editor (`q`/`<Esc>`) and clean-yank-to-clipboard. Returns
 /// the buffer handle. `...` = (results_rows).
 const SETUP_RESULTS_LUA: &str = r#"
 local results_rows = ...
@@ -637,7 +649,8 @@ vim.bo[rbuf].buftype = 'nofile'
 vim.bo[rbuf].bufhidden = 'hide'
 vim.bo[rbuf].swapfile = false
 vim.bo[rbuf].modifiable = false
-pcall(function() vim.o.cmdheight = 0 end)  -- reclaim the bottom row (nvim 0.8+)
+pcall(function() vim.o.cmdheight = 0 end)  -- reclaim the bottom row so the results
+                                           -- statusline sits at the very bottom (nvim 0.8+)
 
 local ew = vim.api.nvim_get_current_win()
 vim.g.nsql_ewin = ew
@@ -651,12 +664,13 @@ vim.wo[rw].foldcolumn = '0'
 vim.wo[rw].winfixheight = true
 vim.wo[rw].cursorline = true
 vim.wo[rw].wrap = false
-vim.wo[rw].statusline = ' results %= ,o focus · y yank · q back '
+vim.wo[rw].statusline = ' results — :w to run '
 pcall(vim.api.nvim_set_current_win, ew)  -- focus stays in the editor
 vim.g.nsql_rwin = rw
+vim.g.nsql_rbuf = rbuf
 
--- q / <Esc> in the results buffer hop back to the editor (it stays read-only,
--- so these never clobber a query).
+-- q / <Esc> in the results buffer hop back to the editor (same toggle key as the
+-- editor's `q`). The buffer is read-only, so these never clobber a query.
 local function back()
   if vim.g.nsql_ewin and vim.api.nvim_win_is_valid(vim.g.nsql_ewin) then
     pcall(vim.api.nvim_set_current_win, vim.g.nsql_ewin)
@@ -680,10 +694,13 @@ pcall(vim.api.nvim_create_autocmd, 'TextYankPost', {
 return rbuf
 "#;
 
-/// Lua: replace the results buffer contents and repaint type colours. `...` =
-/// (rbuf, lines[], marks[] where each mark = {line, col, end_col, hl_group}).
+/// Lua: replace the results buffer contents, repaint type colours, and re-aim the
+/// two status bars. `...` = (rbuf, lines[], marks[], header). When `header` is
+/// non-empty (a real result) the EDITOR statusline becomes a sticky column header
+/// and the bottom bar becomes the main bar (connection + actions); otherwise the
+/// connection stays in the editor bar.
 const WRITE_RESULTS_LUA: &str = r#"
-local rbuf, lines, marks = ...
+local rbuf, lines, marks, header = ...
 if not vim.api.nvim_buf_is_valid(rbuf) then return end
 vim.bo[rbuf].modifiable = true
 vim.api.nvim_buf_set_lines(rbuf, 0, -1, false, lines)
@@ -698,6 +715,18 @@ for _, w in ipairs(vim.api.nvim_list_wins()) do
   if vim.api.nvim_win_get_buf(w) == rbuf then
     pcall(vim.api.nvim_win_set_cursor, w, { 1, 0 })
   end
+end
+-- Re-aim the two bars.
+local function esc(s) return (s:gsub('%%', '%%%%')) end
+local conn = vim.g.nsql_conn or 'nsql'
+local connbar = (vim.g.nsql_prod == 1) and ('%#NsqlProd# PROD %* ' .. esc(conn)) or (' ' .. esc(conn))
+local ew, rw = vim.g.nsql_ewin, vim.g.nsql_rwin
+if header ~= '' then
+  if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = ' ' .. esc(header) end
+  if rw and vim.api.nvim_win_is_valid(rw) then vim.wo[rw].statusline = connbar .. '%= q editor · y yank · ,j json' end
+else
+  if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = connbar .. '%= :w run · q results' end
+  if rw and vim.api.nvim_win_is_valid(rw) then vim.wo[rw].statusline = ' results' end
 end
 "#;
 
@@ -1173,8 +1202,10 @@ impl Handler for RedrawHandler {
                     .unwrap_or(false);
                 let _ = self.run_tx.send(RunMsg::Run { sql, force, all });
             }
-            "nsql_copy" => {
-                let _ = self.run_tx.send(RunMsg::Copy);
+            // rpcnotify(ch, 'nsql_export', 'json'|'csv') from a ,j / ,c keymap.
+            "nsql_export" => {
+                let fmt = args.first().and_then(|v| v.as_str()).unwrap_or("json").to_string();
+                let _ = self.run_tx.send(RunMsg::Export(fmt));
             }
             // TextYankPost in the results buffer ships the yanked text here.
             "nsql_yank" => {
@@ -1427,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn render_outcome_tsv_and_persist() {
+    fn render_outcome_exports_and_persist() {
         // Deterministic: a real query against in-memory sqlite, no nvim/tty.
         let prof = crate::config::Profile {
             name: "t".into(),
@@ -1440,9 +1471,10 @@ mod tests {
         let res = db::run(&prof, sql, false);
         let o = render_outcome(&res, sql, std::time::Duration::from_millis(3));
 
-        let tsv = o.tsv.expect("tsv");
-        assert!(tsv.contains("answer") && tsv.contains('7'));
-        assert!(tsv.contains("(null)"), "null not distinct in tsv");
+        let json = o.json.expect("json");
+        assert!(json.contains("answer") && json.contains('7'));
+        let csv = o.csv.expect("csv");
+        assert!(csv.contains("answer"));
         let persist = o.persist.expect("persist");
         assert!(persist.contains("-- select 7 as answer"), "persist must echo the query");
         assert!(persist.contains('7'));
@@ -1453,7 +1485,7 @@ mod tests {
         let err: Result<db::QueryResult> = Err(anyhow!("kaboom"));
         let o = render_outcome(&err, "select 1", std::time::Duration::from_millis(1));
         assert!(o.persist.is_none(), "an error must not overwrite the persisted result");
-        assert!(o.tsv.is_none());
+        assert!(o.json.is_none() && o.csv.is_none());
     }
 
     #[test]
@@ -1468,18 +1500,21 @@ mod tests {
         // int, text, date-ish text, and NULL — one of each colour class.
         let sql = "select 42 as qty, 'widget' as name, '2026-06-10' as day, null as note";
         let res = db::run(&prof, sql, false);
-        let (lines, marks) = format_for_buffer(&res);
+        let (header, lines, marks) = format_for_buffer(&res);
+
+        // The header is returned SEPARATELY (it becomes the sticky statusline), and
+        // the buffer holds data rows only.
+        assert!(header.contains("qty") && header.contains("name") && header.contains("note"));
 
         // Borderless: a yank of any line must be free of box-drawing chars.
-        for l in &lines {
+        for l in std::iter::once(&header).chain(lines.iter()) {
             assert!(
                 !l.contains('│') && !l.contains('─') && !l.contains('┌') && !l.contains('|'),
-                "results buffer must be borderless for clean copy, got: {l:?}"
+                "results must be borderless for clean copy, got: {l:?}"
             );
         }
-        // Header is present and the values rendered.
-        assert!(lines[0].contains("qty") && lines[0].contains("name"));
-        assert!(lines[1].contains("42") && lines[1].contains("widget"));
+        // First buffer line is the first DATA row (not the header).
+        assert!(lines[0].contains("42") && lines[0].contains("widget"));
         assert!(lines.iter().any(|l| l.contains('∅')), "NULL needs a distinct glyph");
 
         // Type classification by value.
@@ -1488,15 +1523,15 @@ mod tests {
         assert_eq!(classify("2026-06-10", Some(&db::Cell::Text("2026-06-10".into()))), "Constant");
         assert_eq!(classify("99", Some(&db::Cell::Text("99".into()))), "Number");
         assert_eq!(classify("", Some(&db::Cell::Null)), "Comment");
-        // A header mark and at least one Number mark exist.
-        assert!(marks.iter().any(|m| m.hl == "Title"));
-        assert!(marks.iter().any(|m| m.hl == "Number"));
+        // The first data row's cells are marked (line 0 now = data, not header).
+        assert!(marks.iter().any(|m| m.hl == "Number" && m.line == 0));
     }
 
     #[test]
     fn format_for_buffer_error_shows_message() {
         let err: Result<db::QueryResult> = Err(anyhow!("kaboom"));
-        let (lines, marks) = format_for_buffer(&err);
+        let (header, lines, marks) = format_for_buffer(&err);
+        assert!(header.is_empty(), "error has no column header");
         assert!(lines[0].contains("error") && lines[0].contains("kaboom"));
         assert_eq!(marks[0].hl, "ErrorMsg");
     }
@@ -1539,8 +1574,8 @@ mod tests {
     }
 
     /// Deterministically (nvim --clean, no user config to race) verify the
-    /// run-without-quit plumbing: inject.lua's `,r` and `,y` keymaps fire
-    /// rpcnotify that the handler turns into RunMsg::{Run, Copy}.
+    /// run-without-quit plumbing: inject.lua's native `:w` run and the `,j` export
+    /// keymap fire rpcnotify that the handler turns into RunMsg::{Run, Export}.
     #[test]
     fn run_keymap_round_trips_via_rpcnotify() {
         if crate::util::find_on_path("nvim").is_none() {
@@ -1604,14 +1639,16 @@ mod tests {
                 .flatten()
             }
 
-            nvim.input(",r").await.ok();
+            // Native :w (write = execute) → nsql_run.
+            nvim.input(":w<CR>").await.ok();
             let run = next(&mut run_rx, &mut redraw_rx).await;
-            nvim.input(",y").await.ok();
-            let copy = next(&mut run_rx, &mut redraw_rx).await;
+            // ,j → export the last result as JSON.
+            nvim.input(",j").await.ok();
+            let export = next(&mut run_rx, &mut redraw_rx).await;
 
-            nvim.input(",,").await.ok();
+            nvim.input(":qa!<CR>").await.ok();
             let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-            (run, copy)
+            (run, export)
         });
         std::fs::remove_file(&inject).ok();
         std::fs::remove_file(&sqlf).ok();
@@ -1620,8 +1657,11 @@ mod tests {
             Some(RunMsg::Run { sql, .. }) => {
                 assert!(sql.contains("select 7"), "unexpected sql: {sql:?}")
             }
-            _ => panic!("`,r` did not deliver a RunMsg::Run"),
+            _ => panic!("`:w` did not deliver a RunMsg::Run"),
         }
-        assert!(matches!(got_copy, Some(RunMsg::Copy)), "`,y` did not deliver RunMsg::Copy");
+        match got_copy {
+            Some(RunMsg::Export(fmt)) => assert_eq!(fmt, "json"),
+            _ => panic!("`,j` did not deliver a RunMsg::Export"),
+        }
     }
 }
