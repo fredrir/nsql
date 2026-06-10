@@ -88,13 +88,14 @@ Because the results are a **real nvim buffer**, you get all of nvim for free:
   OSC 52 (works over SSH, no `clipboard` setting needed).
 
 The editor uses your **terminal's own background** (only distinct highlights, like a
-selection, paint over it), so it blends in. **nsql draws its own status bar** (top
-row) — coloured **badges**: the database name, plus **SAFE** (green, in `--safe`
-read-only sessions) and **PROD** (red). Because nsql draws it (not nvim's statusline),
-it's guaranteed visible — a statusline plugin can never hide the SAFE badge. Keys live
-in the **`,h`** menu and connection details in **`,i`**, so the bar stays clean. The
-results pane (and its bottom bar) **stay hidden until the first result**; once shown,
-the column header is pinned as the divider above the rows.
+selection, paint over it), so it blends in. There are at most **two bars** and no bar
+above the editor. The **main header** — coloured badges: the database name, **SAFE**
+(green, `--safe`) and **PROD** (red), with `,h help · ,i info` — sits just below the
+editor when there's no output, and **moves to the bottom** once a table shows (the
+slot above the rows then becomes the sticky **column header**). The row count is the
+last row of the table itself — `1000+ rows` (coloured, so it never reads as data) when
+capped, else `N rows`. Keys live in the **`,h`** menu, connection details in **`,i`**.
+The editor and results panes share one height cap (`pane_height` in config, default 12).
 The temp-file path and "written" noise are hidden.
 
 **Native-first keys** — plain run / copy / quit are the vim verbs you already use;

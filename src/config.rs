@@ -57,8 +57,20 @@ impl Paths {
 #[derive(Deserialize, Serialize, Default, Debug)]
 pub struct Config {
     pub default: Option<String>,
+    /// Initial height (rows) of the editor and results panes in the inline session.
+    /// They share this cap; `None` = the default (12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_height: Option<u16>,
     #[serde(default, rename = "profile")]
     pub profiles: Vec<Profile>,
+}
+
+impl Config {
+    /// Configured pane height, clamped to a sane range. Default 12.
+    #[cfg_attr(not(feature = "embed-editor"), allow(dead_code))]
+    pub fn pane_height(&self) -> u16 {
+        self.pane_height.unwrap_or(12).clamp(5, 24)
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -108,6 +120,7 @@ impl Config {
         // works out of the box.
         let cfg = Config {
             default: Some("local".to_string()),
+            pane_height: None,
             profiles: vec![Profile {
                 name: "local".to_string(),
                 url: format!("sqlite://{}", paths.default_db.display()),

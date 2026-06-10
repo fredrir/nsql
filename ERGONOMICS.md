@@ -239,12 +239,22 @@ requires plugins, a colorscheme, or a parser.
   the editor. The column header is pinned in the editor statusline (the divider above
   the rows), the row-count summary in the results statusline.
 
-### ✅ nsql draws its own bar + portable-over-SSH (decided + done)
+### ✅ Two-bar "moving main header" layout (refined)
 
-- **nsql draws the badge bar itself** (ratatui, `build_status_bar`, top row; nvim
-  attaches at `view_h - 1`). Guaranteed visible — a statusline plugin can never hide
-  the SAFE badge. Explicit hex colours. The editor statusline is freed for the sticky
-  header.
+The badge bar is back in nvim's statuslines, but as **at most two bars** that move
+(no bar above the editor; `laststatus=2`):
+
+- The **main header** (db badge · SAFE · PROD · `,h help · ,i info`, `vim.g.nsql_mainbar`)
+  is the editor statusline when there's no output, and **moves to the bottom (results)
+  statusline** once a table shows — its content never changes, it just relocates. The
+  editor statusline then becomes the sticky **column header** (`WRITE_RESULTS_LUA`).
+- The **row count is the last row of the table** (`format_for_buffer`): `1000+ rows`
+  in `WarningMsg` (distinct colour, never reads as data) when capped, else `N rows` dim.
+- **Editor + results share one height cap** (`Config::pane_height`, default 12,
+  configurable; `view_h = 2·pane + 2`). Verified headless: laststatus, the main header
+  relocating editor→bottom, the table header taking the editor slot, the footer row.
+
+### ✅ portable-over-SSH (decided + done)
 - **Portable mode** (`--clean`, auto over SSH via `$SSH_TTY`/`$SSH_CONNECTION`,
   `--no-clean` opts out): spawn `nvim -u nsql_init.lua` — nsql's bundled minimal config
   (`assets/nsql_init.lua`) instead of the user's. Enables filetype/syntax for SQL,

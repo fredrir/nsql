@@ -209,21 +209,36 @@ pcall(function()
   })
 end)
 
--- nsql draws the badge bar ITSELF (row 0, in Rust) so it's guaranteed visible.
--- Here we just: stash the connection facts for the ,i menu, hide nvim's noise, and
--- keep the editor statusline clean (it becomes the sticky column header once a
--- result shows). laststatus=1 → no statuslines until the results split exists, so
--- the bottom bar stays hidden until there's something to show.
+-- The MAIN HEADER (coloured badges: db name · SAFE · PROD · ,h help · ,i info) lives
+-- in nvim's statusline. There are at most TWO bars and the main header never changes
+-- content — it just MOVES: it's the editor statusline when there's no output, and
+-- moves to the bottom (results) statusline once a table shows (the editor statusline
+-- then becomes the sticky column header). No bar above the editor.
 pcall(function()
   vim.opt.shortmess:append("WFI") -- no "written", no file-info intro, no intro
-  vim.o.laststatus = 1 -- statuslines appear only once there are 2 windows (a result)
+  vim.o.laststatus = 2 -- the main header is always shown (1 window) → bottom (2 windows)
   vim.o.ruler = false
-  vim.wo.statusline = "" -- never the temp-file path; WRITE sets the header on results
 
-  vim.g.nsql_db = vim.env.NSQL_DB or "db"
+  local db = vim.env.NSQL_DB or "db"
+  vim.g.nsql_db = db
   vim.g.nsql_url = vim.env.NSQL_URL or ""
-  vim.g.nsql_prod = (vim.env.NSQL_PROD == "1") and 1 or 0
-  vim.g.nsql_safe = (vim.env.NSQL_SAFE == "1") and 1 or 0
+  local prod = vim.env.NSQL_PROD == "1"
+  local safe = vim.env.NSQL_SAFE == "1"
+  vim.g.nsql_prod = prod and 1 or 0
+  vim.g.nsql_safe = safe and 1 or 0
+
+  -- theme-independent badge colours (override NsqlDb/NsqlSafe/NsqlProd to taste).
+  pcall(vim.api.nvim_set_hl, 0, "NsqlDb", { fg = "#1a1b26", bg = "#7aa2f7", bold = true, default = true })
+  pcall(vim.api.nvim_set_hl, 0, "NsqlSafe", { fg = "#1a1b26", bg = "#9ece6a", bold = true, default = true })
+  pcall(vim.api.nvim_set_hl, 0, "NsqlProd", { fg = "#1a1b26", bg = "#f7768e", bold = true, default = true })
+
+  local function esc(s) return (s:gsub("%%", "%%%%")) end
+  local bar = "%#NsqlDb# " .. esc(db) .. " %*"
+  if safe then bar = bar .. " %#NsqlSafe# SAFE %*" end
+  if prod then bar = bar .. " %#NsqlProd# PROD %*" end
+  bar = bar .. "%=,h help · ,i info "
+  vim.g.nsql_mainbar = bar
+  vim.wo.statusline = bar -- the editor statusline starts as the main header
 end)
 
 -- ,h / ,i menus: keep the bar clean; surface keys + connection info on demand in a

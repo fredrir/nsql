@@ -104,17 +104,18 @@ async fn run_session(
 ) -> Result<()> {
     let (cols, rows) = util::term_size();
     let width = cols.max(20);
-    // Split the inline region: editor on top (its last row is nvim's own
-    // statusline, which serves as the divider + status bar), results pane on the
-    // bottom. The scrollback ABOVE is never touched.
-    let total = rows.saturating_sub(2).clamp(8, 30);
-    let results_rows = (total / 2).clamp(4, 12);
-    let editor_rows = total.saturating_sub(results_rows).max(3);
-    let view_h = editor_rows + results_rows + 1; // +1 = nsql's own badge bar (row 0)
-    let grid_h = view_h - 1; // nvim's grid sits BELOW our badge bar
-    // nsql draws its own status bar (badges) so it is GUARANTEED visible — never
-    // overridable by a statusline plugin. Built once from the profile (it's static).
-    let mut status_bar = build_status_bar(profile, width as usize);
+    // Editor on top, results split below (created lazily on the first result). The
+    // editor and results panes SHARE one configurable height cap; +2 for the two
+    // statuslines (the moving "main header" / sticky column header). nvim owns the
+    // bars; nsql renders its whole grid. The scrollback ABOVE is never touched.
+    let cfg_pane = crate::config::Config::load_or_init(paths)
+        .map(|c| c.pane_height())
+        .unwrap_or(12);
+    let max_fit = (rows.saturating_sub(3) / 2).max(4);
+    let pane = cfg_pane.min(max_fit).clamp(4, 24);
+    let editor_rows = pane;
+    let results_rows = pane;
+    let view_h = editor_rows + results_rows + 2;
 
     let mut cmd = Command::new("nvim");
     cmd.env("NSQL_DB", &profile.name)
@@ -153,7 +154,7 @@ async fn run_session(
     opts.set_rgb(true);
     // Attach at the FULL inline height: nvim owns BOTH windows (editor + results
     // split) and draws them — incl. statuslines — into one global grid we render.
-    nvim.ui_attach(width as i64, grid_h as i64, &opts)
+    nvim.ui_attach(width as i64, view_h as i64, &opts)
         .await
         .map_err(|e| anyhow!("nvim ui_attach failed: {e}"))?;
 
@@ -215,7 +216,7 @@ async fn run_session(
     )
     .context("creating inline terminal")?;
 
-    let mut grid = Grid::new(width as usize, grid_h as usize);
+    let mut grid = Grid::new(width as usize, view_h as usize);
     let mut last_shape = Shape::Block;
     // Last result pre-rendered for the export keys (,j / ,c).
     let mut result_json: Option<String> = None;
@@ -253,7 +254,7 @@ async fn run_session(
             dirty = true;
         }
         if dirty {
-            draw_grid(&mut terminal, &grid, &status_bar);
+            draw_grid(&mut terminal, &grid);
         }
         if grid.shape != last_shape {
             last_shape = grid.shape;
@@ -352,9 +353,8 @@ async fn run_session(
                         let _ = nvim.paste(&text, false, -1).await;
                     }
                     Event::Resize(w, _h) => {
-                        grid.resize(w as usize, grid_h as usize);
-                        status_bar = build_status_bar(profile, w as usize);
-                        let _ = nvim.ui_try_resize(w as i64, grid_h as i64).await;
+                        grid.resize(w as usize, view_h as usize);
+                        let _ = nvim.ui_try_resize(w as i64, view_h as i64).await;
                         let _ = terminal.autoresize();
                         let _ = terminal.clear();
                     }
@@ -367,7 +367,7 @@ async fn run_session(
             }
             Some(batch) = redraw_rx.recv() => {
                 apply_redraw(&mut grid, &batch);
-                draw_grid(&mut terminal, &grid, &status_bar);
+                draw_grid(&mut terminal, &grid);
             }
         }
     }
@@ -594,17 +594,18 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
         lines.push(line);
     }
 
-    // Footer (row count), dim.
+    // Footer: the LAST row of the table (not a statusline). `N+ rows` when there are
+    // more than shown (capped) — coloured distinctly (WarningMsg) so the `+` count
+    // never reads as a data value; plain `N rows` (dim) when it's exact.
     let shown = rows.len();
-    let cap = if shown < total {
-        format!(" · showing {shown} of {total} · ,j exports all")
-    } else if truncated.is_some() {
-        " · capped, ,a for all".to_string()
+    let more = truncated.is_some() || shown < total;
+    let footer = if more {
+        format!("{shown}+ rows")
     } else {
-        String::new()
+        format!("{total} row{}", if total == 1 { "" } else { "s" })
     };
-    let footer = format!("({total} row{}{cap})", if total == 1 { "" } else { "s" });
-    marks.push(CellMark { line: lines.len(), col: 0, end: footer.len(), hl: "Comment" });
+    let hl = if more { "WarningMsg" } else { "Comment" };
+    marks.push(CellMark { line: lines.len(), col: 0, end: footer.len(), hl });
     lines.push(footer);
 
     (header, lines, marks)
@@ -786,20 +787,15 @@ end
 return rbuf
 "#;
 
-/// Lua: write the result into the buffer, repaint type colours, and (lazily) show
-/// the results window with a sticky column header in its WINBAR and the row-count
-/// summary in its statusline (the bottom bar). The editor's badge statusline is
-/// left untouched. `...` = (rbuf, lines[], marks[], header).
+/// Lua: write the result into the buffer (footer row included), repaint type
+/// colours, and (lazily) show the results split. Bars MOVE: the editor statusline
+/// becomes the sticky COLUMN HEADER directly above the rows, and the MAIN HEADER
+/// (db badge · SAFE · ,h help) moves to the bottom statusline. On a non-table
+/// outcome the editor statusline reverts to the main header. `...` = (rbuf, lines[],
+/// marks[], header).
 const WRITE_RESULTS_LUA: &str = r#"
 local rbuf, lines, marks, header = ...
 if not vim.api.nvim_buf_is_valid(rbuf) then return end
--- For a table result the last line is the row-count summary → lift it to the
--- bottom bar so the buffer holds data only.
-local summary = ''
-if header ~= '' and #lines > 0 then
-  summary = lines[#lines]
-  table.remove(lines)
-end
 vim.bo[rbuf].modifiable = true
 vim.api.nvim_buf_set_lines(rbuf, 0, -1, false, lines)
 vim.bo[rbuf].modifiable = false
@@ -810,17 +806,16 @@ for _, m in ipairs(marks) do
 end
 local rw = _G.nsql_ensure_rwin and _G.nsql_ensure_rwin() or nil
 local ew = vim.g.nsql_ewin
+local mainbar = vim.g.nsql_mainbar or ''
 if rw and vim.api.nvim_win_is_valid(rw) then
   pcall(vim.api.nvim_win_set_cursor, rw, { 1, 0 })
   local function esc(s) return (s:gsub('%%', '%%%%')) end
-  -- Sticky header in the EDITOR statusline — the divider directly above the rows
-  -- (laststatus=1, so it appears only now that a second window exists). '%<' starts
-  -- it at column 0 to line up with the data.
+  -- Editor statusline: the column HEADER on a table result, else the main header.
   if ew and vim.api.nvim_win_is_valid(ew) then
-    vim.wo[ew].statusline = (header ~= '') and ('%<' .. esc(header)) or ''
+    vim.wo[ew].statusline = (header ~= '') and ('%<' .. esc(header)) or mainbar
   end
-  vim.wo[rw].statusline = (summary ~= '') and (' ' .. esc(summary) .. '%= q editor · y yank ')
-    or ' results '
+  -- Bottom statusline: the MAIN HEADER (moved down once a table shows).
+  vim.wo[rw].statusline = mainbar
 end
 "#;
 
@@ -1112,55 +1107,25 @@ fn translate_key(k: KeyEvent) -> Option<String> {
     }
 }
 
-/// Render the inline region: row 0 is nsql's own **badge bar** (drawn by us, so it
-/// can never be hidden by a statusline plugin), and below it nvim's global grid —
-/// the editor, the (lazy) results split, and their bars. The scrollback above is
-/// never touched. The cursor follows nvim's focused window (offset by the bar row).
+/// Render the inline region: nvim's whole grid — the editor, the (lazy) results
+/// split, and their statuslines (the moving "main header" / sticky column header).
+/// nvim owns the bars; the scrollback above is never touched.
 fn draw_grid(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     grid: &Grid,
-    status_bar: &Line<'static>,
 ) {
     let _ = terminal.draw(|frame| {
         let area = frame.area();
         let w = area.width as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(area.height as usize);
-        lines.push(status_bar.clone()); // row 0 — nsql badge bar
-        let grid_rows = (area.height as usize).saturating_sub(1);
-        for row in grid.cells.iter().take(grid_rows) {
+        for row in grid.cells.iter().take(area.height as usize) {
             lines.push(render_row(grid, row, w));
         }
         frame.render_widget(Paragraph::new(Text::from(lines)), area);
-        // The cursor lives in nvim's grid, which starts at row 1 (below our bar).
         let cx = (grid.cursor.0 as u16).min(area.width.saturating_sub(1));
-        let cy = (grid.cursor.1 as u16 + 1).min(area.height.saturating_sub(1));
+        let cy = (grid.cursor.1 as u16).min(area.height.saturating_sub(1));
         frame.set_cursor_position(Position::new(area.x + cx, area.y + cy));
     });
-}
-
-/// Build nsql's badge bar from the profile (explicit colours → identical on a bare
-/// server). DB name, then SAFE (read-only) and PROD when they apply; `,h`/`,i` hints
-/// right-aligned. nsql draws this itself, so it's guaranteed visible.
-fn build_status_bar(profile: &Profile, width: usize) -> Line<'static> {
-    let ink = Color::Rgb(0x1a, 0x1b, 0x26);
-    let badge = |text: String, bg: Color| {
-        Span::styled(text, Style::default().fg(ink).bg(bg).add_modifier(Modifier::BOLD))
-    };
-    let mut spans: Vec<Span<'static>> = vec![badge(format!(" {} ", profile.name), Color::Rgb(0x7a, 0xa2, 0xf7))];
-    if profile.readonly {
-        spans.push(Span::raw(" "));
-        spans.push(badge(" SAFE ".to_string(), Color::Rgb(0x9e, 0xce, 0x6a)));
-    }
-    if profile.prod {
-        spans.push(Span::raw(" "));
-        spans.push(badge(" PROD ".to_string(), Color::Rgb(0xf7, 0x76, 0x8e)));
-    }
-    let hint = ",h help · ,i info ";
-    let left: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let pad = width.saturating_sub(left + hint.chars().count());
-    spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
-    Line::from(spans)
 }
 
 /// Build one styled line, coalescing runs of cells that share a highlight.
