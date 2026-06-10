@@ -37,6 +37,7 @@ echo "select 'hi' as greeting" | ./target/debug/nsql
 #   q    -> toggle into the results window (hjkl to move, y to copy clean values)
 #   ,a   -> run uncapped       ,R -> force-run on a prod profile
 #   ,j   -> copy result as JSON (OSC 52)        ,c -> as CSV
+#   <C-x><C-o> -> schema-aware completion (live tables/columns from the DB)
 #   :q :wq :q! ZZ -> quit, the native way (buffer saved for next time)
 ```
 
@@ -104,6 +105,10 @@ custom `,`-keys are reserved for *features* (run-variants, exports):
 - **`,a`** runs uncapped; **`,R`** force-runs on a prod-tagged profile (otherwise
   destructive statements are refused in-session). **`,j`** / **`,c`** copy the last
   result as JSON / CSV (OSC 52). Copy a value with a native yank in the results window.
+- **Schema-aware completion** — `<C-x><C-o>` completes **live** table and column names
+  from the connected DB (introspected in the background): tables after `FROM`/`JOIN`,
+  a table's columns after `tbl.`, both otherwise — so `select name from cat` completes
+  `cat` and `name`. Integrates with any completion engine that uses the `omni` source.
 - **On quit, the last result is left in your scrollback** (the query + table, bounded
   to ~a screenful so your prior work stays visible above it).
 - Errors render in the results buffer; the session keeps going.

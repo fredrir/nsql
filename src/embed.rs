@@ -217,6 +217,19 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     let mut spin_i = 0usize;
     const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+    // Introspect the DB schema in the background and hand it to the omnifunc, so
+    // <C-x><C-o> completes live table/column names. Never blocks the editor; a
+    // failure just means no completion.
+    let (schema_tx, mut schema_rx) = mpsc::unbounded_channel::<Value>();
+    {
+        let p = profile.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(s) = introspect_schema(&p) {
+                let _ = schema_tx.send(s);
+            }
+        });
+    }
+
     loop {
         let mut dirty = false;
         while let Ok(batch) = redraw_rx.try_recv() {
@@ -330,6 +343,10 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                     }
                     _ => {}
                 }
+            }
+            // The background schema arrived — hand it to the omnifunc.
+            Some(schema) = schema_rx.recv() => {
+                let _ = nvim.exec_lua(SET_SCHEMA_LUA, vec![schema]).await;
             }
             Some(batch) = redraw_rx.recv() => {
                 apply_redraw(&mut grid, &batch);
@@ -722,13 +739,91 @@ local conn = vim.g.nsql_conn or 'nsql'
 local connbar = (vim.g.nsql_prod == 1) and ('%#NsqlProd# PROD %* ' .. esc(conn)) or (' ' .. esc(conn))
 local ew, rw = vim.g.nsql_ewin, vim.g.nsql_rwin
 if header ~= '' then
-  if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = ' ' .. esc(header) end
+  -- The header is a STICKY column header for the rows below it, so it must start
+  -- at screen column 0 — no leading space — to line up with the data (which also
+  -- starts at col 0). '%#StatusLine#' just paints it as a normal statusline.
+  if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = '%<' .. esc(header) end
   if rw and vim.api.nvim_win_is_valid(rw) then vim.wo[rw].statusline = connbar .. '%= q editor · y yank · ,j json' end
 else
   if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = connbar .. '%= :w run · q results' end
   if rw and vim.api.nvim_win_is_valid(rw) then vim.wo[rw].statusline = ' results' end
 end
 "#;
+
+// ---- schema-aware completion -------------------------------------------------
+
+const SQLITE_SCHEMA_Q: &str = "SELECT m.name, p.name FROM sqlite_master m \
+     JOIN pragma_table_info(m.name) p \
+     WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' \
+     ORDER BY m.name, p.cid";
+const PG_SCHEMA_Q: &str = "SELECT table_name, column_name FROM information_schema.columns \
+     WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+     ORDER BY table_name, ordinal_position";
+
+/// Lua: stash the live schema as a global the omnifunc reads. `...` = the schema
+/// map { tables=[…], columns=[…], by_table={ t=[cols] } }.
+const SET_SCHEMA_LUA: &str = "_G.nsql_schema = ...";
+
+/// Introspect the connected DB's tables + columns into a Lua-ready map for the
+/// omnifunc. Runs on the blocking pool (it's a live query) and is best-effort: any
+/// failure just means no completion. `None` for engines/queries we can't introspect.
+fn introspect_schema(profile: &Profile) -> Option<Value> {
+    let q = match profile.scheme() {
+        "sqlite" => SQLITE_SCHEMA_Q,
+        "postgres" | "postgresql" => PG_SCHEMA_Q,
+        _ => return None,
+    };
+    let rows = match db::run(profile, q, true).ok()? {
+        db::QueryResult::Rows { rows, .. } => rows,
+        _ => return None,
+    };
+    // The query is ordered by table, so consecutive rows of the same table group.
+    let mut tables: Vec<String> = Vec::new();
+    let mut by_table: Vec<(String, Vec<String>)> = Vec::new();
+    let mut all_cols: Vec<String> = Vec::new();
+    let mut seen_col = std::collections::HashSet::new();
+    for row in &rows {
+        let t = cell_str(row.first());
+        let c = cell_str(row.get(1));
+        if t.is_empty() {
+            continue;
+        }
+        if by_table.last().map(|(n, _)| n != &t).unwrap_or(true) {
+            tables.push(t.clone());
+            by_table.push((t.clone(), Vec::new()));
+        }
+        if !c.is_empty() {
+            by_table.last_mut().unwrap().1.push(c.clone());
+            if seen_col.insert(c.clone()) {
+                all_cols.push(c);
+            }
+        }
+    }
+    if tables.is_empty() {
+        return None;
+    }
+    let arr = |v: &[String]| Value::Array(v.iter().map(|s| Value::from(s.as_str())).collect());
+    let by_table_v = Value::Map(
+        by_table
+            .iter()
+            .map(|(t, cols)| (Value::from(t.as_str()), arr(cols)))
+            .collect(),
+    );
+    Some(Value::Map(vec![
+        (Value::from("tables"), arr(&tables)),
+        (Value::from("columns"), arr(&all_cols)),
+        (Value::from("by_table"), by_table_v),
+    ]))
+}
+
+fn cell_str(c: Option<&db::Cell>) -> String {
+    match c {
+        Some(db::Cell::Text(s)) => s.clone(),
+        Some(db::Cell::Int(i)) => i.to_string(),
+        Some(db::Cell::Real(f)) => f.to_string(),
+        _ => String::new(),
+    }
+}
 
 /// RAII restore of the terminal (raw mode, bracketed paste, cursor shape) — runs
 /// on a normal return AND during a panic unwind, so a crash never leaves the
@@ -1534,6 +1629,42 @@ mod tests {
         assert!(header.is_empty(), "error has no column header");
         assert!(lines[0].contains("error") && lines[0].contains("kaboom"));
         assert_eq!(marks[0].hl, "ErrorMsg");
+    }
+
+    #[test]
+    fn introspect_schema_lists_tables_and_columns() {
+        // A real on-disk sqlite DB (memory is per-connection, so it wouldn't
+        // survive the separate introspection connection).
+        let path = std::env::temp_dir().join(format!("nsql-schema-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let prof = crate::config::Profile {
+            name: "t".into(),
+            url: format!("sqlite://{}", path.display()),
+            prod: false,
+            readonly: false,
+            no_history: false,
+        };
+        db::run(&prof, "create table cat(name text, age int)", true).unwrap();
+        db::run(&prof, "create table dog(id int, label text)", true).unwrap();
+
+        let schema = introspect_schema(&prof).expect("schema");
+        let get = |v: &Value, k: &str| -> Option<Value> {
+            if let Value::Map(m) = v {
+                m.iter().find(|(kk, _)| kk.as_str() == Some(k)).map(|(_, vv)| vv.clone())
+            } else {
+                None
+            }
+        };
+        let tables = get(&schema, "tables").unwrap();
+        let tnames: Vec<&str> = tables.as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
+        assert!(tnames.contains(&"cat") && tnames.contains(&"dog"), "tables: {tnames:?}");
+
+        let by_table = get(&schema, "by_table").unwrap();
+        let cat_cols = get(&by_table, "cat").unwrap();
+        let cnames: Vec<&str> = cat_cols.as_array().unwrap().iter().filter_map(|c| c.as_str()).collect();
+        assert!(cnames.contains(&"name") && cnames.contains(&"age"), "cat cols: {cnames:?}");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

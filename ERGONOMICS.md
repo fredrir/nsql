@@ -166,6 +166,20 @@ the full result is still exportable / re-runnable).
   and aligned to the same columns; the connection moves to the bottom bar. With no
   result, the connection is the editor's bar (prod in red).
 
+### ✅ Schema-aware completion + aligned sticky header
+
+- **Completion** (`<C-x><C-o>`): nsql introspects the live DB (`introspect_schema`
+  → `information_schema.columns` for Postgres, `sqlite_master` + `pragma_table_info`
+  for SQLite) on the blocking pool at session start and hands the tables/columns map
+  to a global the omnifunc reads (`SET_SCHEMA_LUA` → `_G.nsql_schema` → `NsqlOmni`).
+  Context-aware: tables after `FROM`/`JOIN`/`INTO`/`UPDATE`, a table's columns after
+  `tbl.`, both otherwise. Best-effort + background, so it never blocks or breaks the
+  editor. Verified: `introspect_schema` unit test + a headless omnifunc probe
+  (`from c`→tables, `cat.`→columns, base-filtered).
+- **Sticky-header alignment fix**: the header statusline had a leading space the data
+  rows lacked — dropped it (`%<` truncation marker, no width), so the pinned header
+  lines up column-for-column with the rows below.
+
 ### ✅ Bug: inline ad-hoc passwords now survive resume
 
 `nsql postgres://user:pw@host/db` used to connect fine but break on bare-`nsql`

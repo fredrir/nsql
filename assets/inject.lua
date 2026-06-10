@@ -6,6 +6,7 @@
 --   q              toggle between the editor and the results window
 --   ,a             run uncapped (all rows)        ,R   run on a prod profile (force past the guard)
 --   ,j  /  ,c      copy the last result as JSON / CSV (OSC 52)
+--   <C-x><C-o>     schema-aware completion (live tables & columns from the DB)
 --   :q :wq :q! ZZ  quit, the native way (your buffer is saved for next time)
 --   (in the results window: hjkl to move, y to copy clean values, q to come back)
 --
@@ -94,6 +95,52 @@ pcall(function()
       pcall(vim.api.nvim_set_current_win, w)
     end
   end, o)
+
+  -- Schema-aware omni-completion (<C-x><C-o>). nsql fills _G.nsql_schema from the
+  -- LIVE database in the background; this function reads it and completes tables
+  -- after FROM/JOIN/INTO/UPDATE, a table's columns after `tbl.`, and both
+  -- otherwise — so `select name from cat` completes `cat` (table) and `name`
+  -- (column). Plays nice with completion engines that use the 'omni' source.
+  function _G.NsqlOmni(findstart, base)
+    if findstart == 1 then
+      local line = vim.api.nvim_get_current_line()
+      local col = vim.api.nvim_win_get_cursor(0)[2]
+      local s = col
+      while s > 0 and line:sub(s, s):match("[%w_]") do
+        s = s - 1
+      end
+      return s
+    end
+    local schema = _G.nsql_schema
+    if not schema then
+      return {}
+    end
+    local col = vim.api.nvim_win_get_cursor(0)[2]
+    local before = vim.api.nvim_get_current_line():sub(1, col):lower()
+    local b = (base or ""):lower()
+    local out, seen = {}, {}
+    local function add(word, menu)
+      if word and not seen[word] and (b == "" or word:lower():sub(1, #b) == b) then
+        seen[word] = true
+        table.insert(out, { word = word, menu = menu })
+      end
+    end
+    local dot = before:match("([%w_]+)%.[%w_]*$")
+    if dot and schema.by_table and schema.by_table[dot] then
+      for _, c in ipairs(schema.by_table[dot]) do add(c, "[col]") end
+    elseif before:match("%f[%w]from%s+[%w_]*$")
+      or before:match("%f[%w]join%s+[%w_]*$")
+      or before:match("%f[%w]into%s+[%w_]*$")
+      or before:match("%f[%w]update%s+[%w_]*$")
+    then
+      for _, t in ipairs(schema.tables or {}) do add(t, "[table]") end
+    else
+      for _, t in ipairs(schema.tables or {}) do add(t, "[table]") end
+      for _, c in ipairs(schema.columns or {}) do add(c, "[col]") end
+    end
+    return out
+  end
+  vim.bo.omnifunc = "v:lua.NsqlOmni"
 
   -- Native quit (:q / :wq / :q! / ZZ) ends the WHOLE session. The results split
   -- auto-closes when it becomes the last window, so quitting the editor leaves
