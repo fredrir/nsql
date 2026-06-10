@@ -2,10 +2,11 @@
 -- these win without disturbing your global setup. Everything is pcall-guarded so
 -- a failure can never brick the editor.
 --
---   ,r  = run the statement under the cursor (results in the bottom pane)
+--   ,r  = run the statement under the cursor (result in the bottom window)
 --   ,R  = run it even on a prod profile (force past the safety guard)
 --   ,a  = run uncapped (all rows)
 --   ,y  = copy the last result to the clipboard (TSV, via OSC 52)
+--   ,o  = jump into the results window (hjkl to navigate, y to copy clean values)
 --   ,,  = quit (saves your buffer for next time)   ,q = quit
 --   :w  also previews (runs the statement under the cursor) without quitting
 --
@@ -67,6 +68,16 @@ pcall(function()
   vim.keymap.set("n", ",R", function() run({ force = true }) end, o)
   vim.keymap.set("n", ",a", function() run({ all = true }) end, o)
   vim.keymap.set("n", ",y", function() notify("nsql_copy") end, o)
+
+  -- ,o jumps into the results window (a real buffer: navigate with hjkl, visual
+  -- select + y to copy clean values; q / <Esc> there hop back here). Native
+  -- <C-w>j/<C-w>k also work — these are just the convenient shortcuts.
+  vim.keymap.set("n", ",o", function()
+    local w = vim.g.nsql_rwin
+    if w and vim.api.nvim_win_is_valid(w) then
+      pcall(vim.api.nvim_set_current_win, w)
+    end
+  end, o)
 
   -- Visual ,r: run exactly the selection.
   vim.keymap.set("x", ",r", function()

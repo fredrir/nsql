@@ -129,15 +129,25 @@ real nvim) and the clamps above cover them anyway.
 - ✅ Exit-persist **bounded** to ~a screenful so the user's prior work stays
   visible above the persisted result.
 
-### Next: results in a real nvim buffer (the bigger pivot)
+### ✅ Results in a real nvim buffer (the pivot — done)
 
-Two asks need the results to live in a **second nvim window/buffer** rather than an
-nsql-drawn pane: (7) **type-aware highlighting** (ints/dates/strings/NULL coloured
-by type, via per-cell extmark `hl_group`s); (8) **navigate the table the native nvim
-way** (move between editor and results windows, `hjkl`, visual select) with **clean
-copy** (yank yields the values, not the box-drawing chars — borderless/aligned, or
-column separators as virtual text). This makes nsql render only nvim's grid (nvim
-owns the split + statusline), which is also simpler. Deferred as a focused step.
+The results now live in a **scratch nvim buffer** in a split below the editor
+(`SETUP_RESULTS_LUA`); nsql renders nvim's whole grid (nvim owns the split + both
+statuslines). This delivered:
+
+- (7) **type-aware highlighting** — `format_for_buffer` classifies each cell by TYPE
+  *and* value (so Postgres text columns colour correctly) into nvim hl groups
+  (`Number` / `String` / `Boolean` / `Constant` for dates / `Comment` for NULL /
+  `Title` for headers), applied as per-cell extmarks (`WRITE_RESULTS_LUA`).
+- (8) **native navigation + clean copy** — `,o` (or `<C-w>j`) enters the results
+  window; `hjkl` / visual-select / `q`-to-go-back all work because it's just a buffer.
+  The table is **borderless/aligned**, so a yank copies values (verified: `42   widget`,
+  no box chars). A `TextYankPost` autocmd mirrors any yank to the clipboard via OSC 52.
+
+Verified end-to-end on real nvim (pty + headless): the split renders, values +
+headers + footer show, the connection statusline divides, the extmark hl groups land,
+and `yy` emits a clean OSC-52 payload. Bounded at 2000 on-screen rows (extmark cap;
+the full result is still `,y`-copyable / re-runnable).
 
 ## Build order (friction-removed-per-effort)
 

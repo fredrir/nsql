@@ -71,29 +71,38 @@ The **default** is a persistent zero-flash session that never enters the alterna
 screen at all. It spawns `nvim --embed` (a headless editing engine that draws
 nothing to the terminal), drives it over msgpack-RPC with your real config /
 treesitter / LSP, and renders its `ext_linegrid` redraw stream — **in color** —
-into a ratatui **inline** region split into an editor (top) and a **results pane**
-(bottom).
+into a ratatui **inline** region. nvim itself owns a horizontal split: an editor on
+top and a **results buffer** below, and we render nvim's whole grid.
 
-The editor region uses your **terminal's own background** (only highlights with a
-distinct colour, like a selection, paint over it), so it blends in rather than
-sitting in a box. **nvim's native statusline** shows the active connection (and
-serves as the divider above the results) — **prod connections render in red** so a
-glance tells you where you're aimed. The temp-file path and "written" noise are
-hidden.
+Because the results are a **real nvim buffer**, you get all of nvim for free:
+
+- **Type-aware colours** — integers, dates, booleans, strings and NULL are each
+  painted by *value* (so Postgres text columns colour correctly too), via per-cell
+  extmarks that resolve to your colorscheme.
+- **Native navigation** — `,o` (or `<C-w>j`) hops into the results window; move with
+  `hjkl`, visual-select, search — it's just a buffer. `q` / `<Esc>` hop back.
+- **Clean copy** — the table is borderless/aligned, so a yank copies the **values**,
+  not box-drawing chars. Any yank there also mirrors to your system clipboard via
+  OSC 52 (works over SSH, no `clipboard` setting needed).
+
+The editor uses your **terminal's own background** (only distinct highlights, like a
+selection, paint over it), so it blends in. **nvim's native statusline** shows the
+active connection and is the divider above the results — **prod connections render in
+red**. The temp-file path and "written" noise are hidden.
 
 The session stays open and runs queries on demand:
 
-- `,r` runs the **statement under the cursor**; `:w` also previews. While you
-  iterate, the result shows in a **bottom pane** — your scrollback above is never
-  touched or scrolled, so you keep an eye on your main task. A slow query runs in
-  the background with a live `running… Ns` spinner (the editor never freezes).
+- `,r` runs the **statement under the cursor**; `:w` also previews. The result lands
+  in the bottom window — your scrollback above is never touched, so you keep an eye
+  on your main task. A slow query runs in the background with a live `running… Ns`
+  spinner (the editor never freezes).
 - **On quit, the last result is left in your scrollback** (the query + table,
   bounded to ~a screenful so your prior work stays visible above it), so the answer
   stays in context with your work — the whole point of a sidetrack tool.
-- `,y` copies the last result as TSV (OSC 52 — works over SSH). `,a` runs uncapped.
+- `,y` copies the whole last result as TSV (OSC 52). `,a` runs uncapped.
 - `,R` force-runs on a prod-tagged profile (otherwise destructive statements are
   refused in-session). `,,` / `,q` quit (your buffer is saved for next time).
-- Errors render in the pane; the session keeps going.
+- Errors render in the results buffer; the session keeps going.
 
 ```sh
 nsql            # zero-flash persistent session (default)
@@ -119,7 +128,7 @@ back to Mode 1 automatically when there's no terminal (e.g. `--edit` while pipin
 
 | Command | What |
 |---|---|
-| `nsql` | open the zero-flash persistent session (`,r` run · `,y` copy · `,,` quit) |
+| `nsql` | open the zero-flash persistent session (`,r` run · `,o` into results · `,y` copy · `,,` quit) |
 | `nsql --classic` | use the classic transient-child editor (Mode 1) instead |
 | `nsql --edit` | force the editor even when piping |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |
