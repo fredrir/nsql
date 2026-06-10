@@ -82,8 +82,17 @@ fn pgpass_lookup(id: &PgIdentity) -> Option<String> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".pgpass")))?;
 
+    // Reject a symlinked pgpass (an attacker could point it elsewhere); check the
+    // link itself before following it.
+    if std::fs::symlink_metadata(&path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        eprintln!("nsql: ignoring {} — it is a symlink", path.display());
+        return None;
+    }
     let meta = std::fs::metadata(&path).ok()?;
-    // Must be a regular file (reject a symlink-to-dir/fifo/device target).
+    // Must be a regular file (reject a fifo/device target).
     if !meta.is_file() {
         return None;
     }

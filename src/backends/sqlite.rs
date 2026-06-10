@@ -12,6 +12,8 @@ pub fn run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
         rusqlite::Connection::open(target)
     }
     .with_context(|| format!("opening sqlite database `{target}`"))?;
+    // A locked db file blocks the session otherwise; fail after a bounded wait.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
 
     let trimmed = sql.trim();
     let mut stmt = conn.prepare(trimmed).context("preparing SQL")?;

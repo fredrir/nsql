@@ -25,10 +25,15 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
             cfg.password(pw);
         }
     }
+    // Bound the connect so an unreachable host fails fast instead of hanging.
+    cfg.connect_timeout(std::time::Duration::from_secs(8));
 
     let mut client = cfg
         .connect(postgres::NoTls)
         .with_context(|| format!("connecting to {}", util::redact_url(&profile.url)))?;
+
+    // Bound a runaway query (cartesian join, scan of a huge table) server-side.
+    let _ = client.simple_query("SET statement_timeout = '30s'");
 
     let messages = client
         .simple_query(sql.trim())

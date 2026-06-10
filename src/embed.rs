@@ -64,6 +64,9 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<()> {
         .context("starting embed runtime")?;
 
     let res = rt.block_on(run_session(paths, &tmp, profile));
+    // Don't block on a query still running on the blocking pool if the user quit
+    // mid-query — detach it so quitting is instant.
+    rt.shutdown_background();
     // Always restore the terminal, whatever happened.
     let _ = disable_raw_mode();
     res?;
@@ -177,6 +180,13 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     let mut results: Vec<String> =
         vec!["  (no results yet · ,r run · ,y copy · ,, quit)".to_string()];
     let mut result_tsv: Option<String> = None;
+    // A query runs on the blocking pool and reports back here, so the event loop
+    // keeps pumping redraws/keys (the editor never freezes) and the sync postgres
+    // crate's own runtime can't nest in ours.
+    let (qdone_tx, mut qdone_rx) =
+        mpsc::unbounded_channel::<(Result<db::QueryResult>, std::time::Instant, String)>();
+    let mut in_flight: Option<std::time::Instant> = None;
+    let mut spinner = tokio::time::interval(std::time::Duration::from_millis(120));
 
     loop {
         let mut dirty = false;
@@ -196,6 +206,17 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
             };
             let _ = execute!(std::io::stdout(), style);
         }
+        // Live "running… Ns" while a query is in flight. Done here (top of loop,
+        // which runs on every wakeup) rather than in a select arm, so nvim's
+        // redraw stream can't starve it. The spinner tick just guarantees a
+        // wakeup at least every 120ms even when the editor is idle.
+        if let Some(started) = in_flight {
+            results = vec![format!(
+                "  running… {:.1}s   (,q to abandon and quit)",
+                started.elapsed().as_secs_f64()
+            )];
+            draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
+        }
 
         tokio::select! {
             biased;
@@ -203,11 +224,33 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
             Some(msg) = run_rx.recv() => {
                 match msg {
                     RunMsg::Run { sql, force, all } => {
-                        run_query(
-                            paths, profile, &sql, force, all,
-                            &mut results, &mut result_tsv,
-                            &mut terminal, &grid, editor_rows, results_rows,
-                        );
+                        if in_flight.is_some() {
+                            results = vec!["  a query is already running…".to_string()];
+                            draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
+                        } else if db::strip_sql_comments(&sql).trim().is_empty() {
+                            results = vec!["  (nothing to run)".to_string()];
+                            draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
+                        } else {
+                            // guard is fast (no I/O); only the query itself is offloaded.
+                            match db::guard(profile, &sql, force, false) {
+                                Err(e) => {
+                                    results = vec![format!("  error: {}", first_line(&format!("{e:#}")))];
+                                    draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
+                                }
+                                Ok(()) => {
+                                    let started = std::time::Instant::now();
+                                    in_flight = Some(started);
+                                    results = vec![format!("  running: {}…", first_line(&sql))];
+                                    draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
+                                    let p = profile.clone();
+                                    let tx = qdone_tx.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        let r = db::run(&p, &sql, all);
+                                        let _ = tx.send((r, started, sql));
+                                    });
+                                }
+                            }
+                        }
                     }
                     RunMsg::Copy => {
                         if let Some(tsv) = &result_tsv {
@@ -218,6 +261,50 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                     }
                 }
             }
+            // A query finished (on the blocking pool) — render it.
+            Some((res, started, sql)) = qdone_rx.recv() => {
+                in_flight = None;
+                match res {
+                    Ok(result) => {
+                        let table_opts = render::Options {
+                            format: render::Format::Table,
+                            is_tty: true,
+                            echo: None,
+                            elapsed: Some(started.elapsed()),
+                        };
+                        let mut lines: Vec<String> = render::format(&result, &table_opts)
+                            .lines()
+                            .map(|l| l.to_string())
+                            .collect();
+                        // Hard ceiling on in-session rendered lines (a `,a`/--all
+                        // result must never balloon memory); the full result is
+                        // still copyable via ,y.
+                        const MAX_PANE_LINES: usize = 5000;
+                        if lines.len() > MAX_PANE_LINES {
+                            lines.truncate(MAX_PANE_LINES);
+                            lines.push("  … (more rows — ,y copies the full result)".to_string());
+                        }
+                        results = lines;
+                        let tsv_opts = render::Options {
+                            format: render::Format::Tsv,
+                            is_tty: false,
+                            echo: None,
+                            elapsed: None,
+                        };
+                        result_tsv = Some(render::format(&result, &tsv_opts));
+                        if !profile.no_history {
+                            let _ = history::record(paths, &profile.name, &sql);
+                        }
+                    }
+                    Err(e) => {
+                        results = vec![format!("  error: {}", first_line(&format!("{e:#}")))];
+                    }
+                }
+                draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
+            }
+            // Wake the loop at least every 120ms so the spinner above advances
+            // even when nvim sends no redraws.
+            _ = spinner.tick() => {}
             Some(ev) = key_rx.recv() => {
                 match ev {
                     Event::Key(k) => {
@@ -264,77 +351,7 @@ impl Drop for TermGuard {
     }
 }
 
-/// Execute one query and update the results pane. Never propagates an error out
-/// of the session: guard/DB failures render as an in-pane message.
-#[allow(clippy::too_many_arguments)]
-fn run_query(
-    paths: &Paths,
-    profile: &Profile,
-    sql: &str,
-    force: bool,
-    all: bool,
-    results: &mut Vec<String>,
-    result_tsv: &mut Option<String>,
-    terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    grid: &Grid,
-    editor_rows: u16,
-    results_rows: u16,
-) {
-    if db::strip_sql_comments(sql).trim().is_empty() {
-        *results = vec!["  (nothing to run)".to_string()];
-        draw_session(terminal, grid, editor_rows, results_rows, results);
-        return;
-    }
-    // Immediate feedback before the (blocking) query.
-    *results = vec![format!("  running: {}…", first_line(sql))];
-    draw_session(terminal, grid, editor_rows, results_rows, results);
-
-    let started = std::time::Instant::now();
-    let outcome = run_blocking(profile, sql, force, all);
-    match outcome {
-        Ok(result) => {
-            let table_opts = render::Options {
-                format: render::Format::Table,
-                is_tty: true,
-                echo: None,
-                elapsed: Some(started.elapsed()),
-            };
-            *results = render::format(&result, &table_opts)
-                .lines()
-                .map(|l| l.to_string())
-                .collect();
-            let tsv_opts = render::Options {
-                format: render::Format::Tsv,
-                is_tty: false,
-                echo: None,
-                elapsed: None,
-            };
-            *result_tsv = Some(render::format(&result, &tsv_opts));
-            if !profile.no_history {
-                let _ = history::record(paths, &profile.name, sql);
-            }
-        }
-        Err(e) => {
-            // Single-line, already-redacted error (db.rs masks the DSN).
-            *results = vec![format!("  error: {}", first_line(&format!("{e:#}")))];
-        }
-    }
-    draw_session(terminal, grid, editor_rows, results_rows, results);
-}
-
-/// Run guard+query OFF the async runtime. The sync `postgres` crate spins its
-/// OWN tokio runtime and `block_on`s it; calling that from inside the embed
-/// runtime panics with "Cannot start a runtime from within a runtime". A scoped
-/// OS thread isn't driving our runtime, so the nested block_on is fine. (rusqlite
-/// is pure-sync and unaffected, but this routes all backends uniformly.)
-fn run_blocking(profile: &Profile, sql: &str, force: bool, all: bool) -> Result<db::QueryResult> {
-    std::thread::scope(|s| {
-        s.spawn(|| db::guard(profile, sql, force, false).and_then(|_| db::run(profile, sql, all)))
-            .join()
-            .unwrap_or_else(|_| Err(anyhow!("the query thread panicked")))
-    })
-}
-
+/// First meaningful line of a query, truncated — for the "running: …" label.
 fn first_line(s: &str) -> String {
     let line = s
         .lines()
@@ -711,13 +728,14 @@ fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
         if let Some(h) = c.get(1).and_then(|v| v.as_u64()) {
             last_hl = h as u16;
         }
-        let repeat = c.get(2).and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        // Clamp the repeat to the cells that actually remain on the row — a
+        // malformed huge repeat must never spin the redraw loop.
+        let remaining = grid.w.saturating_sub(col) as u64;
+        let repeat = c.get(2).and_then(|v| v.as_u64()).unwrap_or(1).max(1).min(remaining);
         let ch = text.chars().next().unwrap_or(' ');
         for _ in 0..repeat {
-            if col < grid.w {
-                grid.cells[row][col] = GCell { ch, hl: last_hl };
-                col += 1;
-            }
+            grid.cells[row][col] = GCell { ch, hl: last_hl };
+            col += 1;
         }
     }
 }
@@ -730,28 +748,41 @@ fn apply_grid_scroll(grid: &mut Grid, p: &[Value]) {
         return;
     };
     let rows = p.get(5).and_then(|v| v.as_i64()).unwrap_or(0);
-    let (top, bot, left, right) = (top as usize, bot as usize, left as usize, right as usize);
+    // Clamp every bound to the grid so a malformed redraw can never index OOB
+    // (unsigned_abs avoids the i64::MIN negation overflow).
+    let (top, bot, left, right) = (
+        (top as usize).min(grid.h),
+        (bot as usize).min(grid.h),
+        (left as usize).min(grid.w),
+        (right as usize).min(grid.w),
+    );
     if rows > 0 {
-        let r = rows as usize;
+        let r = rows.unsigned_abs() as usize;
         for dst in top..bot.saturating_sub(r) {
-            for col in left..right.min(grid.w) {
+            if dst + r >= grid.h {
+                break;
+            }
+            for col in left..right {
                 grid.cells[dst][col] = grid.cells[dst + r][col];
             }
         }
-        for dst in bot.saturating_sub(r)..bot.min(grid.h) {
-            for col in left..right.min(grid.w) {
+        for dst in bot.saturating_sub(r)..bot {
+            for col in left..right {
                 grid.cells[dst][col] = GCell::default();
             }
         }
     } else if rows < 0 {
-        let r = (-rows) as usize;
+        let r = rows.unsigned_abs() as usize;
         for dst in (top + r..bot).rev() {
-            for col in left..right.min(grid.w) {
+            if dst < r {
+                continue;
+            }
+            for col in left..right {
                 grid.cells[dst][col] = grid.cells[dst - r][col];
             }
         }
         for dst in top..(top + r).min(grid.h) {
-            for col in left..right.min(grid.w) {
+            for col in left..right {
                 grid.cells[dst][col] = GCell::default();
             }
         }
@@ -1035,7 +1066,13 @@ mod tests {
             readonly: false,
             no_history: false,
         };
-        let r = rt.block_on(async { run_blocking(&prof, "select 1", false, false) });
+        // The session runs queries via spawn_blocking; replicate that so the
+        // sync postgres crate's own runtime can't nest in ours.
+        let r = rt.block_on(async move {
+            tokio::task::spawn_blocking(move || db::run(&prof, "select 1", false))
+                .await
+                .unwrap()
+        });
         assert!(r.is_err(), "expected a connection error, not a panic/Ok");
     }
 

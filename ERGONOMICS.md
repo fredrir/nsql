@@ -70,6 +70,37 @@ behavior if nvim / introspection / a plugin / the DB is missing.
 Remaining: CLI collapse to `-e`/`-y` · history-ring tabs · schema completion ·
 interactive "save password to keyring?" prompt on first connect.
 
+## Stabilization pass ("never distract")
+
+A reported crash triggered a robustness audit (4 lenses → each finding independently
+verified → prioritized plan). Fixed this pass:
+
+- ✅ **P0 — Postgres-in-session panic killed.** Running a Postgres query in the session
+  used to panic ("Cannot start a runtime from within a runtime" — the sync `postgres`
+  crate spins its own runtime inside ours). Queries now run on the **blocking pool**
+  (`spawn_blocking`).
+- ✅ **P0 — slow query no longer freezes the editor.** The query is offloaded; the event
+  loop keeps pumping redraws/keys with a **live "running… Ns" spinner** (rendered at the
+  top of the loop so nvim's redraws can't starve it). Verified: 337 bytes of redraws
+  emitted *during* a 2s `pg_sleep` query (vs ~0 when it blocked). Quitting mid-query is
+  instant (`shutdown_background`).
+- ✅ **P0/P1 — time bounds** so nothing hangs unbounded: Postgres `connect_timeout(8s)` +
+  `statement_timeout 30s`; SQLite `busy_timeout(5s)`.
+- ✅ **P0 — terminal never left corrupted.** `TermGuard` restores raw mode / bracketed
+  paste / cursor shape on Drop, including a panic unwind.
+- ✅ **Redraw hardening** (a malformed redraw can't panic/freeze the loop): `grid_line`
+  repeat clamped to remaining width; `grid_scroll` bounds-clamped + `unsigned_abs` (no
+  i64::MIN overflow).
+- ✅ **Memory bound** on in-session results (`,a`/--all) — rendered lines capped; the full
+  result is still copyable with `,y`.
+- ✅ `~/.pgpass` rejects symlinks.
+
+Deferred (lower-ROL, mostly malformed-local-nvim hardening or P2 wording): per-query cancel
+key (timeouts cover the unbounded case); SQLite silently running only the first of multiple
+statements; friendlier config-parse error; panic-message legibility (a panic hook). The
+grid OOB/overflow "P0s" the verifiers flagged were re-graded P3 by synthesis (in-bounds for
+real nvim) and the clamps above cover them anyway.
+
 ## Build order (friction-removed-per-effort)
 
 - **Step 0 — `render::format()` extraction** *(no behavior change; enables everything)*.
