@@ -74,11 +74,18 @@ treesitter / LSP, and renders its `ext_linegrid` redraw stream — **in color** 
 into a ratatui **inline** region split into an editor (top) and a **results pane**
 (bottom).
 
+The editor region uses your **terminal's own background** (only highlights with a
+distinct colour, like a selection, paint over it), so it blends in rather than
+sitting in a box.
+
 The session stays open and runs queries on demand:
 
-- `,r` runs the **statement under the cursor**; `:w` also previews. The result
-  shows in the bottom pane — **your scrollback above is never touched or scrolled**,
-  so you keep an eye on your main task.
+- `,r` runs the **statement under the cursor**; `:w` also previews. While you
+  iterate, the result shows in a **bottom pane** — your scrollback above is never
+  touched or scrolled, so you keep an eye on your main task. A slow query runs in
+  the background with a live `running… Ns` spinner (the editor never freezes).
+- **On quit, the last result is left in your scrollback** (the query + table), so
+  the answer stays in context with your work — the whole point of a sidetrack tool.
 - `,y` copies the last result as TSV (OSC 52 — works over SSH). `,a` runs uncapped.
 - `,R` force-runs on a prod-tagged profile (otherwise destructive statements are
   refused in-session). `,,` / `,q` quit (your buffer is saved for next time).

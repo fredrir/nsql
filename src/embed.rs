@@ -180,6 +180,9 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     let mut results: Vec<String> =
         vec!["  (no results yet · ,r run · ,y copy · ,, quit)".to_string()];
     let mut result_tsv: Option<String> = None;
+    // The last successful result, rendered with its query — printed into the
+    // user's scrollback on exit so the answer stays in context with their work.
+    let mut last_persist: Option<String> = None;
     // A query runs on the blocking pool and reports back here, so the event loop
     // keeps pumping redraws/keys (the editor never freezes) and the sync postgres
     // crate's own runtime can't nest in ours.
@@ -264,41 +267,16 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
             // A query finished (on the blocking pool) — render it.
             Some((res, started, sql)) = qdone_rx.recv() => {
                 in_flight = None;
-                match res {
-                    Ok(result) => {
-                        let table_opts = render::Options {
-                            format: render::Format::Table,
-                            is_tty: true,
-                            echo: None,
-                            elapsed: Some(started.elapsed()),
-                        };
-                        let mut lines: Vec<String> = render::format(&result, &table_opts)
-                            .lines()
-                            .map(|l| l.to_string())
-                            .collect();
-                        // Hard ceiling on in-session rendered lines (a `,a`/--all
-                        // result must never balloon memory); the full result is
-                        // still copyable via ,y.
-                        const MAX_PANE_LINES: usize = 5000;
-                        if lines.len() > MAX_PANE_LINES {
-                            lines.truncate(MAX_PANE_LINES);
-                            lines.push("  … (more rows — ,y copies the full result)".to_string());
-                        }
-                        results = lines;
-                        let tsv_opts = render::Options {
-                            format: render::Format::Tsv,
-                            is_tty: false,
-                            echo: None,
-                            elapsed: None,
-                        };
-                        result_tsv = Some(render::format(&result, &tsv_opts));
-                        if !profile.no_history {
-                            let _ = history::record(paths, &profile.name, &sql);
-                        }
-                    }
-                    Err(e) => {
-                        results = vec![format!("  error: {}", first_line(&format!("{e:#}")))];
-                    }
+                let outcome = render_outcome(&res, &sql, started.elapsed());
+                results = outcome.pane;
+                if outcome.tsv.is_some() {
+                    result_tsv = outcome.tsv;
+                }
+                if outcome.persist.is_some() {
+                    last_persist = outcome.persist;
+                }
+                if res.is_ok() && !profile.no_history {
+                    let _ = history::record(paths, &profile.name, &sql);
                 }
                 draw_session(&mut terminal, &grid, editor_rows, results_rows, &results);
             }
@@ -332,8 +310,80 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     }
 
     shutdown.store(true, Ordering::Relaxed);
+    // Persist the last result into the real scrollback so the answer stays in
+    // context with the user's main work after nsql exits (insert_before pushes it
+    // ABOVE the inline region, which we then clear).
+    if let Some(block) = &last_persist {
+        let lines: Vec<Line> = block.lines().map(|l| Line::from(l.to_string())).collect();
+        let h = (lines.len() as u16).clamp(1, 400);
+        let _ = terminal.insert_before(h, move |buf| {
+            use ratatui::widgets::Widget;
+            Paragraph::new(Text::from(lines)).render(buf.area, buf);
+        });
+    }
     let _ = terminal.clear(); // wipe nsql's region; _term_guard restores the terminal
     Ok(())
+}
+
+/// What to show for a finished query: the bottom-pane lines, the full result as
+/// TSV (for `,y` copy), and a block to leave in scrollback on exit. Pure — the
+/// core query→render logic, unit-testable without nvim or a tty.
+struct Outcome {
+    pane: Vec<String>,
+    tsv: Option<String>,
+    persist: Option<String>,
+}
+
+fn render_outcome(res: &Result<db::QueryResult>, sql: &str, elapsed: std::time::Duration) -> Outcome {
+    match res {
+        Ok(result) => {
+            let table = render::Options {
+                format: render::Format::Table,
+                is_tty: true,
+                echo: None,
+                elapsed: Some(elapsed),
+            };
+            let mut pane: Vec<String> =
+                render::format(result, &table).lines().map(|l| l.to_string()).collect();
+            // Hard ceiling on in-session rendered lines (a `,a`/--all result must
+            // never balloon memory); the full result is still copyable via ,y.
+            const MAX_PANE_LINES: usize = 5000;
+            if pane.len() > MAX_PANE_LINES {
+                pane.truncate(MAX_PANE_LINES);
+                pane.push("  … (more rows — ,y copies the full result)".to_string());
+            }
+            let tsv = render::format(
+                result,
+                &render::Options {
+                    format: render::Format::Tsv,
+                    is_tty: false,
+                    echo: None,
+                    elapsed: None,
+                },
+            );
+            // The persisted block echoes the query (as `-- ` comments) above the
+            // table so the scrollback entry is self-describing.
+            let persist = render::format(
+                result,
+                &render::Options {
+                    format: render::Format::Table,
+                    is_tty: true,
+                    echo: Some(sql.to_string()),
+                    elapsed: Some(elapsed),
+                },
+            );
+            Outcome {
+                pane,
+                tsv: Some(tsv),
+                persist: Some(persist),
+            }
+        }
+        Err(e) => Outcome {
+            pane: vec![format!("  error: {}", first_line(&format!("{e:#}")))],
+            tsv: None,
+            persist: None, // keep the last successful result for the exit scrollback
+        },
+    }
 }
 
 /// RAII restore of the terminal (raw mode, bracketed paste, cursor shape) — runs
@@ -535,8 +585,14 @@ fn resolve_style(grid: &Grid, hl: u16) -> Style {
     if let Some(fg) = a.fg.or(grid.def_fg) {
         s = s.fg(rgb(fg));
     }
-    if let Some(bg) = a.bg.or(grid.def_bg) {
-        s = s.bg(rgb(bg));
+    // Blend with the native terminal: leave the DEFAULT background transparent
+    // (the terminal's own bg shows through), and only paint a background for
+    // highlights that have their own distinct bg — a visual selection, search
+    // match, diagnostic, etc.
+    if let Some(bg) = a.bg {
+        if Some(bg) != grid.def_bg {
+            s = s.bg(rgb(bg));
+        }
     }
     if a.bold {
         s = s.add_modifier(Modifier::BOLD);
@@ -1074,6 +1130,70 @@ mod tests {
                 .unwrap()
         });
         assert!(r.is_err(), "expected a connection error, not a panic/Ok");
+    }
+
+    #[test]
+    fn render_outcome_pane_tsv_and_persist() {
+        // Deterministic: a real query against in-memory sqlite, no nvim/tty.
+        let prof = crate::config::Profile {
+            name: "t".into(),
+            url: "sqlite::memory:".into(),
+            prod: false,
+            readonly: false,
+            no_history: false,
+        };
+        let sql = "select 7 as answer, null as n";
+        let res = db::run(&prof, sql, false);
+        let o = render_outcome(&res, sql, std::time::Duration::from_millis(3));
+
+        assert!(o.pane.iter().any(|l| l.contains('7')), "pane missing value");
+        assert!(o.pane.iter().any(|l| l.contains("answer")), "pane missing header");
+        let tsv = o.tsv.expect("tsv");
+        assert!(tsv.contains("answer") && tsv.contains('7'));
+        assert!(tsv.contains("(null)"), "null not distinct in tsv");
+        let persist = o.persist.expect("persist");
+        assert!(persist.contains("-- select 7 as answer"), "persist must echo the query");
+        assert!(persist.contains('7'));
+    }
+
+    #[test]
+    fn render_outcome_error_does_not_persist() {
+        let err: Result<db::QueryResult> = Err(anyhow!("kaboom"));
+        let o = render_outcome(&err, "select 1", std::time::Duration::from_millis(1));
+        assert!(o.persist.is_none(), "an error must not overwrite the persisted result");
+        assert!(o.tsv.is_none());
+        assert!(o.pane[0].contains("error"));
+    }
+
+    #[test]
+    fn default_background_is_transparent() {
+        // The editor blends with the terminal: the default bg is never painted,
+        // but a highlight with its own distinct bg (a selection) is.
+        let mut g = Grid::new(2, 1);
+        g.def_bg = Some(0x112233);
+        assert!(resolve_style(&g, 0).bg.is_none(), "default bg must be transparent");
+        g.hl.insert(
+            1,
+            Attr {
+                bg: Some(0x112233),
+                ..Default::default()
+            },
+        );
+        assert!(
+            resolve_style(&g, 1).bg.is_none(),
+            "a bg equal to the default must stay transparent"
+        );
+        g.hl.insert(
+            2,
+            Attr {
+                bg: Some(0xff0000),
+                ..Default::default()
+            },
+        );
+        assert!(
+            resolve_style(&g, 2).bg.is_some(),
+            "a distinct highlight bg must be painted"
+        );
     }
 
     fn grid_has(g: &Grid, needle: &str) -> bool {

@@ -101,6 +101,22 @@ statements; friendlier config-parse error; panic-message legibility (a panic hoo
 grid OOB/overflow "P0s" the verifiers flagged were re-graded P3 by synthesis (in-bounds for
 real nvim) and the clamps above cover them anyway.
 
+## Unintrusive polish + testability
+
+- ✅ **Background blends with the terminal.** The editor region no longer paints
+  nvim's colorscheme background — the default bg is left transparent (terminal
+  shows through); only highlights with a *distinct* bg (selection/search) paint.
+- ✅ **Output persists in context on exit.** Results live in the transient bottom
+  pane while iterating (don't disturb the scrollback), and on quit the **last
+  result (query + table) is left in the real scrollback** (`insert_before`), so the
+  answer sits in context with the user's main work — the tool's core purpose.
+- ✅ **Testability:** the query→render core is now a pure `render_outcome()`
+  (pane lines / TSV-for-copy / scrollback-persist block), unit-tested
+  deterministically against in-memory SQLite — no nvim, no tty, no flaky pty.
+  Background-blend and error-handling are unit-tested too. (Next testing
+  investment: abstract the terminal + input behind traits so the full session loop
+  gets a deterministic integration test; the pty drives stay as manual dev checks.)
+
 ## Build order (friction-removed-per-effort)
 
 - **Step 0 — `render::format()` extraction** *(no behavior change; enables everything)*.
