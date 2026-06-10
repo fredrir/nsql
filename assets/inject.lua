@@ -96,11 +96,35 @@ pcall(function()
     end
   end, o)
 
-  -- Schema-aware omni-completion (<C-x><C-o>). nsql fills _G.nsql_schema from the
-  -- LIVE database in the background; this function reads it and completes tables
-  -- after FROM/JOIN/INTO/UPDATE, a table's columns after `tbl.`, and both
-  -- otherwise — so `select name from cat` completes `cat` (table) and `name`
-  -- (column). Plays nice with completion engines that use the 'omni' source.
+  -- Schema-aware completion. nsql fills _G.nsql_schema from the LIVE database in
+  -- the background. One shared context analyser feeds three consumers below:
+  -- (1) a blink.cmp source, (2) the omnifunc, (3) a vanilla auto-popup. It completes
+  -- tables after FROM/JOIN/INTO/UPDATE, a table's columns after `tbl.`, and both
+  -- otherwise — so `select name from cat` completes `cat` (table) and `name` (column).
+  -- kind = "table" | "column"; the caller maps that to its own UI.
+  function _G.nsql_complete_words()
+    local schema = _G.nsql_schema
+    if not schema then return {} end
+    local col = vim.api.nvim_win_get_cursor(0)[2]
+    local before = vim.api.nvim_get_current_line():sub(1, col):lower()
+    local out = {}
+    local dot = before:match("([%w_]+)%.[%w_]*$")
+    if dot and schema.by_table and schema.by_table[dot] then
+      for _, c in ipairs(schema.by_table[dot]) do out[#out + 1] = { word = c, kind = "column" } end
+    elseif before:match("%f[%w]from%s+[%w_]*$")
+      or before:match("%f[%w]join%s+[%w_]*$")
+      or before:match("%f[%w]into%s+[%w_]*$")
+      or before:match("%f[%w]update%s+[%w_]*$")
+    then
+      for _, t in ipairs(schema.tables or {}) do out[#out + 1] = { word = t, kind = "table" } end
+    else
+      for _, t in ipairs(schema.tables or {}) do out[#out + 1] = { word = t, kind = "table" } end
+      for _, c in ipairs(schema.columns or {}) do out[#out + 1] = { word = c, kind = "column" } end
+    end
+    return out
+  end
+
+  -- (2) omnifunc — for <C-x><C-o> and any engine using the 'omni' source.
   function _G.NsqlOmni(findstart, base)
     if findstart == 1 then
       local line = vim.api.nvim_get_current_line()
@@ -111,36 +135,78 @@ pcall(function()
       end
       return s
     end
-    local schema = _G.nsql_schema
-    if not schema then
-      return {}
-    end
-    local col = vim.api.nvim_win_get_cursor(0)[2]
-    local before = vim.api.nvim_get_current_line():sub(1, col):lower()
-    local b = (base or ""):lower()
-    local out, seen = {}, {}
-    local function add(word, menu)
-      if word and not seen[word] and (b == "" or word:lower():sub(1, #b) == b) then
-        seen[word] = true
-        table.insert(out, { word = word, menu = menu })
+    local b, out, seen = (base or ""):lower(), {}, {}
+    for _, it in ipairs(_G.nsql_complete_words()) do
+      if not seen[it.word] and (b == "" or it.word:lower():sub(1, #b) == b) then
+        seen[it.word] = true
+        out[#out + 1] = { word = it.word, menu = "[" .. it.kind .. "]" }
       end
-    end
-    local dot = before:match("([%w_]+)%.[%w_]*$")
-    if dot and schema.by_table and schema.by_table[dot] then
-      for _, c in ipairs(schema.by_table[dot]) do add(c, "[col]") end
-    elseif before:match("%f[%w]from%s+[%w_]*$")
-      or before:match("%f[%w]join%s+[%w_]*$")
-      or before:match("%f[%w]into%s+[%w_]*$")
-      or before:match("%f[%w]update%s+[%w_]*$")
-    then
-      for _, t in ipairs(schema.tables or {}) do add(t, "[table]") end
-    else
-      for _, t in ipairs(schema.tables or {}) do add(t, "[table]") end
-      for _, c in ipairs(schema.columns or {}) do add(c, "[col]") end
     end
     return out
   end
   vim.bo.omnifunc = "v:lua.NsqlOmni"
+
+  -- (1) blink.cmp source — registered after startup (blink loads on VimEnter), so
+  -- tables/columns auto-pop in blink's own UI. blink fuzzy-matches, so we hand it
+  -- the full context-appropriate list and let it filter.
+  vim.schedule(function()
+    local ok, blink = pcall(require, "blink.cmp")
+    if not ok or type(blink.add_source_provider) ~= "function" then return end
+    local KIND = { table = 7, column = 5 } -- LSP CompletionItemKind: Class / Field
+    local src = {}
+    function src.new() return setmetatable({}, { __index = src }) end
+    function src:get_trigger_characters() return { "." } end
+    function src:get_completions(_, callback)
+      local items = {}
+      for _, it in ipairs(_G.nsql_complete_words()) do
+        items[#items + 1] = {
+          label = it.word,
+          kind = KIND[it.kind] or 1,
+          labelDetails = { description = it.kind },
+        }
+      end
+      callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
+      return function() end
+    end
+    package.loaded["nsql._blink"] = src
+    pcall(blink.add_source_provider, "nsql", { name = "nsql", module = "nsql._blink", score_offset = 5 })
+    pcall(function()
+      require("blink.cmp.sources.lib").add_filetype_provider_id("sql", "nsql")
+    end)
+  end)
+
+  -- :NsqlSchema — diagnostics: did the background introspection load anything?
+  pcall(vim.api.nvim_create_user_command, "NsqlSchema", function()
+    local s = _G.nsql_schema
+    if not s then
+      vim.notify("nsql: schema not loaded yet (introspection pending or failed)", vim.log.levels.WARN)
+    else
+      vim.notify(("nsql: %d tables, %d columns loaded"):format(#(s.tables or {}), #(s.columns or {})))
+    end
+  end, {})
+
+  -- (3) vanilla auto-popup — ONLY when no completion engine is active (re-checked
+  -- each keystroke so a lazily-loaded engine takes over and we never fight it).
+  local function has_engine()
+    return package.loaded["cmp"]
+      or package.loaded["blink.cmp"] or package.loaded["blink"]
+      or package.loaded["coc.nvim"] or vim.g.loaded_coc ~= nil
+      or package.loaded["mini.completion"] or vim.g.loaded_ddc ~= nil
+  end
+  vim.api.nvim_create_autocmd("TextChangedI", {
+    buffer = 0,
+    callback = function()
+      if has_engine() or vim.fn.pumvisible() == 1 or not _G.nsql_schema then
+        return
+      end
+      local col = vim.api.nvim_win_get_cursor(0)[2]
+      local before = vim.api.nvim_get_current_line():sub(1, col)
+      if before:match("[%w_][%w_]$") or before:match("[%w_]%.$") then
+        vim.api.nvim_feedkeys(
+          vim.api.nvim_replace_termcodes("<C-x><C-o>", true, true, true), "n", false)
+      end
+    end,
+  })
 
   -- Native quit (:q / :wq / :q! / ZZ) ends the WHOLE session. The results split
   -- auto-closes when it becomes the last window, so quitting the editor leaves

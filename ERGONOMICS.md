@@ -176,9 +176,37 @@ the full result is still exportable / re-runnable).
   `tbl.`, both otherwise. Best-effort + background, so it never blocks or breaks the
   editor. Verified: `introspect_schema` unit test + a headless omnifunc probe
   (`from c`→tables, `cat.`→columns, base-filtered).
+- **Per-identifier highlighting** (`SET_SCHEMA_LUA`): the same schema paints known
+  table/column names in the editor via `matchadd` — a window-local layer that sits on
+  top of syntax *and* treesitter, whole-word + case-insensitive, live as you type.
+  `NsqlSchemaTable`→`Type`, `NsqlSchemaColumn`→`Identifier` (overridable). Verified
+  headless (whole-word: `cat` yes / `category` no; case-insensitive; correct links).
+  Caveat: matchadd is not context-aware, so a known name inside a string/comment also
+  colours — acceptable for a scratch buffer.
 - **Sticky-header alignment fix**: the header statusline had a leading space the data
   rows lacked — dropped it (`%<` truncation marker, no width), so the pinned header
   lines up column-for-column with the rows below.
+
+### ✅ Completion that auto-pops (blink.cmp source) + treesitter highlighting
+
+- **Root cause of "no completion":** omnifunc alone isn't consumed by nvim-cmp/blink;
+  they need a registered source. (dadbod-completion is no help — it needs a dadbod
+  `:DB` connection the nsql session doesn't set.) Fix: one shared `nsql_complete_words`
+  context analyser feeds three consumers — a **blink.cmp source** (registered via
+  `add_source_provider` + `add_filetype_provider_id('sql', …)`, deferred past blink's
+  VimEnter load), the **omnifunc** (`<C-x><C-o>` / nvim-cmp `omni`), and a **vanilla
+  auto-popup** (gated off when any engine is detected). Verified against the installed
+  blink v1.10.2. `:NsqlSchema` reports tables/columns loaded.
+- **Highlighting upgraded to treesitter** (`SET_SCHEMA_LUA`): walks the `sql` parse
+  tree, colours only leaf identifier nodes that match the schema, **skipping
+  string/comment subtrees**, kept fresh on edits (debounced 150ms). Falls back to
+  `matchadd` when there's no `sql` parser (so install it with `:TSInstall sql` for the
+  precise version). table-vs-column by membership (tables win ties); clause-precision
+  is a future refinement.
+- **Persist footer fixed** (`render_persist`): the old exit block rendered the full
+  bordered result (~2000 lines for a 1000-row cap) then truncated by *lines*, so
+  "1988 more rows" was actually lines. Now: query echo + first 10 rows borderless +
+  ONE honest line (`-- first 1000 rows (capped) · ,a or nsql -e for all`).
 
 ### ✅ Bug: inline ad-hoc passwords now survive resume
 

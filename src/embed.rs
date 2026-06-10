@@ -294,11 +294,11 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                 }
             }
             // A query finished (on the blocking pool) — render it into the buffer.
-            Some((res, started, sql)) = qdone_rx.recv() => {
+            Some((res, _started, sql)) = qdone_rx.recv() => {
                 in_flight = None;
                 let (header, lines, marks) = format_for_buffer(&res);
                 write_results(&nvim, rbuf, &header, &lines, &marks).await;
-                let outcome = render_outcome(&res, &sql, started.elapsed());
+                let outcome = render_outcome(&res, &sql);
                 if outcome.json.is_some() {
                     result_json = outcome.json;
                     result_csv = outcome.csv;
@@ -360,16 +360,12 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     // context with the user's main work after nsql exits (insert_before pushes it
     // ABOVE the inline region, which we then clear).
     if let Some(block) = &last_persist {
-        // Bounded: persist at most a screenful-ish so the user's prior work stays
-        // visible above it. A bigger result was on screen during the session and
-        // is reachable via re-run / -e.
-        const MAX_PERSIST: usize = 18;
+        // `render_persist` already produced a compact block (query + first rows +
+        // one summary line). A generous safety cap guards against a pathological
+        // multi-line query echo, but normal results are ~13 lines.
         let mut src: Vec<String> = block.lines().map(|l| l.to_string()).collect();
-        if src.len() > MAX_PERSIST {
-            let more = src.len() - (MAX_PERSIST - 1);
-            src.truncate(MAX_PERSIST - 1);
-            src.push(format!("-- … {more} more rows (re-run, or `nsql -e` to pipe)"));
-        }
+        const MAX_PERSIST: usize = 30;
+        src.truncate(MAX_PERSIST);
         let lines: Vec<Line> = src.into_iter().map(Line::from).collect();
         let h = lines.len() as u16;
         let _ = terminal.insert_before(h, move |buf| {
@@ -391,7 +387,7 @@ struct Outcome {
     persist: Option<String>,
 }
 
-fn render_outcome(res: &Result<db::QueryResult>, sql: &str, elapsed: std::time::Duration) -> Outcome {
+fn render_outcome(res: &Result<db::QueryResult>, sql: &str) -> Outcome {
     let fmt = |result, f| {
         render::format(
             result,
@@ -399,30 +395,86 @@ fn render_outcome(res: &Result<db::QueryResult>, sql: &str, elapsed: std::time::
         )
     };
     match res {
-        Ok(result) => {
-            // The persisted block echoes the query (as `-- ` comments) above the
-            // table so the scrollback entry is self-describing.
-            let persist = render::format(
-                result,
-                &render::Options {
-                    format: render::Format::Table,
-                    is_tty: true,
-                    echo: Some(sql.to_string()),
-                    elapsed: Some(elapsed),
-                },
-            );
-            Outcome {
-                json: Some(fmt(result, render::Format::Json)),
-                csv: Some(fmt(result, render::Format::Csv)),
-                persist: Some(persist),
-            }
-        }
+        Ok(result) => Outcome {
+            json: Some(fmt(result, render::Format::Json)),
+            csv: Some(fmt(result, render::Format::Csv)),
+            persist: Some(render_persist(result, sql)),
+        },
         Err(_) => Outcome {
             json: None,
             csv: None,
             persist: None, // keep the last successful result for the exit scrollback
         },
     }
+}
+
+/// A COMPACT, accurate scrollback record for exit: the query echoed, the first few
+/// rows borderless-aligned, and ONE concise summary line. Never renders the whole
+/// result (a bordered 1000-row table is ~2000 lines) and never mislabels lines as
+/// rows — so prior work stays visible above it.
+fn render_persist(result: &db::QueryResult, sql: &str) -> String {
+    use std::fmt::Write;
+    const SHOW: usize = 10;
+    let mut out = String::new();
+    for l in sql.lines() {
+        let t = l.trim();
+        if !t.is_empty() {
+            let _ = writeln!(out, "-- {t}");
+        }
+    }
+    match result {
+        db::QueryResult::Affected { changes } => {
+            let _ = writeln!(out, "-- ✓ {changes} row(s) affected");
+        }
+        db::QueryResult::Rows { columns, rows, truncated } => {
+            if columns.is_empty() {
+                let _ = writeln!(out, "-- (0 rows)");
+                return out;
+            }
+            const MAXW: usize = 40;
+            let ncol = columns.len();
+            let total = rows.len();
+            let show = &rows[..total.min(SHOW)];
+            let disp: Vec<Vec<String>> = show
+                .iter()
+                .map(|r| (0..ncol).map(|i| buf_cell(r.get(i))).collect())
+                .collect();
+            let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count().min(MAXW)).collect();
+            for row in &disp {
+                for (i, c) in row.iter().enumerate() {
+                    if i < ncol {
+                        widths[i] = widths[i].max(c.chars().count()).min(MAXW);
+                    }
+                }
+            }
+            let sep = "  ";
+            let row_line = |cells: &dyn Fn(usize) -> String| {
+                let mut line = String::new();
+                for i in 0..ncol {
+                    let s = truncate_disp(&cells(i), widths[i]);
+                    line.push_str(&s);
+                    push_pad(&mut line, widths[i].saturating_sub(s.chars().count()));
+                    if i + 1 < ncol {
+                        line.push_str(sep);
+                    }
+                }
+                line.trim_end().to_string()
+            };
+            let _ = writeln!(out, "{}", row_line(&|i| columns[i].clone()));
+            for r in &disp {
+                let _ = writeln!(out, "{}", row_line(&|i| r[i].clone()));
+            }
+            // One concise, honest summary line.
+            if truncated.is_some() {
+                let _ = writeln!(out, "-- first {total} rows (capped) · ,a or `nsql -e` for all");
+            } else if total > show.len() {
+                let _ = writeln!(out, "-- {total} rows ({} shown) · `nsql -e` for all", show.len());
+            } else {
+                let _ = writeln!(out, "-- {total} row{}", if total == 1 { "" } else { "s" });
+            }
+        }
+    }
+    out
 }
 
 // ---- results buffer: type-coloured, clean-yank table ---------------------
@@ -760,9 +812,99 @@ const PG_SCHEMA_Q: &str = "SELECT table_name, column_name FROM information_schem
      WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
      ORDER BY table_name, ordinal_position";
 
-/// Lua: stash the live schema as a global the omnifunc reads. `...` = the schema
-/// map { tables=[…], columns=[…], by_table={ t=[cols] } }.
-const SET_SCHEMA_LUA: &str = "_G.nsql_schema = ...";
+/// Lua: stash the live schema as a global the completion code reads, AND paint
+/// known table / column names in the editor. Prefers TREESITTER (precise: only
+/// real identifier nodes colour, strings/comments are skipped, kept fresh on edits)
+/// and falls back to whole-word `matchadd` when there's no `sql` parser. `...` = the
+/// schema map { tables=[…], columns=[…], by_table={…} }.
+const SET_SCHEMA_LUA: &str = r#"
+local s = ...
+_G.nsql_schema = s
+pcall(function()
+  local ew = vim.g.nsql_ewin
+  local buf = vim.g.nsql_ebuf
+  if not (ew and vim.api.nvim_win_is_valid(ew)) then return end
+  -- Overridable defaults; link to theme groups so tables vs columns vs keywords
+  -- are all distinguishable.
+  vim.api.nvim_set_hl(0, 'NsqlSchemaTable', { link = 'Type', default = true })
+  vim.api.nvim_set_hl(0, 'NsqlSchemaColumn', { link = 'Identifier', default = true })
+
+  local tset, cset = {}, {}
+  for _, t in ipairs(s.tables or {}) do tset[t:lower()] = true end
+  for _, c in ipairs(s.columns or {}) do cset[c:lower()] = true end
+  local ns = vim.api.nvim_create_namespace('nsql_schema_hl')
+
+  -- TREESITTER: walk the parse tree, colour leaf identifier nodes that match the
+  -- schema, skipping string / comment / literal subtrees. Returns true if it ran.
+  local skip = { string = true, comment = true, literal = true, string_literal = true,
+                 marginalia = true, dollar_quote = true, ['string_content'] = true }
+  local function ts_paint()
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then return false end
+    local ok, parser = pcall(vim.treesitter.get_parser, buf, 'sql')
+    if not ok or not parser then return false end
+    local okp, trees = pcall(function() return parser:parse() end)
+    if not okp or not trees[1] then return false end
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    local function walk(node, in_skip)
+      local sk = in_skip or skip[node:type()] or false
+      local has_named = false
+      for child in node:iter_children() do
+        if child:named() then has_named = true; walk(child, sk) end
+      end
+      if not has_named and not sk then
+        local txt = vim.treesitter.get_node_text(node, buf)
+        if txt and txt:match('^[%w_]+$') then
+          local low = txt:lower()
+          local hl = tset[low] and 'NsqlSchemaTable' or (cset[low] and 'NsqlSchemaColumn' or nil)
+          if hl then
+            local sr, sc, er, ec = node:range()
+            pcall(vim.api.nvim_buf_set_extmark, buf, ns, sr, sc,
+              { end_row = er, end_col = ec, hl_group = hl, priority = 150 })
+          end
+        end
+      end
+    end
+    walk(trees[1]:root(), false)
+    return true
+  end
+
+  -- FALLBACK: matchadd (whole-word, case-insensitive; colours everywhere including
+  -- strings/comments — acceptable for a scratch buffer with no sql parser).
+  local function matchadd_paint()
+    local function pat(list, cap)
+      local parts = {}
+      for i = 1, math.min(#list, cap) do parts[#parts + 1] = (list[i]:gsub('\\', '\\\\')) end
+      if #parts == 0 then return nil end
+      return '\\c\\V\\<\\%(' .. table.concat(parts, '\\|') .. '\\)\\>'
+    end
+    local tp, cp = pat(s.tables or {}, 1000), pat(s.columns or {}, 2000)
+    vim.api.nvim_win_call(ew, function()
+      for _, m in ipairs(vim.fn.getmatches()) do
+        if m.group == 'NsqlSchemaTable' or m.group == 'NsqlSchemaColumn' then
+          pcall(vim.fn.matchdelete, m.id)
+        end
+      end
+      if cp then pcall(vim.fn.matchadd, 'NsqlSchemaColumn', cp, 10) end
+      if tp then pcall(vim.fn.matchadd, 'NsqlSchemaTable', tp, 11) end
+    end)
+  end
+
+  if ts_paint() then
+    -- keep it fresh on edits, debounced (coalesce to one repaint per 150ms).
+    local pending = false
+    vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI' }, {
+      buffer = buf,
+      callback = function()
+        if pending then return end
+        pending = true
+        vim.defer_fn(function() pending = false; pcall(ts_paint) end, 150)
+      end,
+    })
+  else
+    matchadd_paint()
+  end
+end)
+"#;
 
 /// Introspect the connected DB's tables + columns into a Lua-ready map for the
 /// omnifunc. Runs on the blocking pool (it's a live query) and is best-effort: any
@@ -1564,7 +1706,7 @@ mod tests {
         };
         let sql = "select 7 as answer, null as n";
         let res = db::run(&prof, sql, false);
-        let o = render_outcome(&res, sql, std::time::Duration::from_millis(3));
+        let o = render_outcome(&res, sql);
 
         let json = o.json.expect("json");
         assert!(json.contains("answer") && json.contains('7'));
@@ -1572,13 +1714,14 @@ mod tests {
         assert!(csv.contains("answer"));
         let persist = o.persist.expect("persist");
         assert!(persist.contains("-- select 7 as answer"), "persist must echo the query");
-        assert!(persist.contains('7'));
+        assert!(persist.contains('7') && persist.contains("answer"));
+        assert!(persist.contains("-- 1 row"), "persist needs a concise summary line");
     }
 
     #[test]
     fn render_outcome_error_does_not_persist() {
         let err: Result<db::QueryResult> = Err(anyhow!("kaboom"));
-        let o = render_outcome(&err, "select 1", std::time::Duration::from_millis(1));
+        let o = render_outcome(&err, "select 1");
         assert!(o.persist.is_none(), "an error must not overwrite the persisted result");
         assert!(o.json.is_none() && o.csv.is_none());
     }

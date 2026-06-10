@@ -105,10 +105,16 @@ custom `,`-keys are reserved for *features* (run-variants, exports):
 - **`,a`** runs uncapped; **`,R`** force-runs on a prod-tagged profile (otherwise
   destructive statements are refused in-session). **`,j`** / **`,c`** copy the last
   result as JSON / CSV (OSC 52). Copy a value with a native yank in the results window.
-- **Schema-aware completion** — `<C-x><C-o>` completes **live** table and column names
-  from the connected DB (introspected in the background): tables after `FROM`/`JOIN`,
+- **Schema-aware completion + highlighting** — nsql introspects the connected DB in
+  the background and completes **live** table/column names (tables after `FROM`/`JOIN`,
   a table's columns after `tbl.`, both otherwise — so `select name from cat` completes
-  `cat` and `name`. Integrates with any completion engine that uses the `omni` source.
+  `cat` and `name`). It wires itself into your completion engine automatically: it
+  registers a **blink.cmp** source (and exposes the same via `omnifunc` / `<C-x><C-o>`
+  for nvim-cmp's `omni` source or vanilla nvim, plus a built-in auto-popup when no
+  engine is present). `:NsqlSchema` reports what loaded. Recognised names are also
+  **coloured as you type** — precise **treesitter** highlighting when the `sql` parser
+  is installed (`:TSInstall sql`; skips strings/comments), else whole-word `matchadd`
+  (`NsqlSchemaTable`→`Type`, `NsqlSchemaColumn`→`Identifier`, both overridable).
 - **On quit, the last result is left in your scrollback** (the query + table, bounded
   to ~a screenful so your prior work stays visible above it).
 - Errors render in the results buffer; the session keeps going.
