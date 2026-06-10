@@ -23,6 +23,18 @@ pcall(function()
   vim.g.nsql_ebuf = vim.api.nvim_get_current_buf()
   vim.g.nsql_ewin = vim.api.nvim_get_current_win()
 
+  -- Hide nsql's internals: the editor is backed by a temp file, but we never want
+  -- to show that path (in the statusline, or in the "Save changes to …?" quit
+  -- prompt). Switch it to a clean named scratch (buftype=acwrite) and remember the
+  -- real temp path privately — :w then mirrors the buffer to it (for resume) via the
+  -- BufWriteCmd below. So nvim only ever shows the name "nsql".
+  vim.g.nsql_tmpfile = vim.api.nvim_buf_get_name(0)
+  pcall(function()
+    vim.bo.buftype = "acwrite"
+    vim.api.nvim_buf_set_name(0, "nsql")
+    vim.bo.modified = false
+  end)
+
   -- nsql sets g:nsql_chan to its RPC channel right after attaching (the channel
   -- can't be discovered reliably from inside a startup luafile, so we read it
   -- lazily at fire time).
@@ -67,15 +79,71 @@ pcall(function()
     })
   end
 
-  -- Run is the native :w (write = execute). `:wq` runs then quits.
-  vim.api.nvim_create_autocmd("BufWritePost", {
+  -- Run is the native :w (write = execute). `:wq` runs then quits. The buffer is an
+  -- acwrite scratch, so WE own the write: mirror it to the hidden temp file (so the
+  -- next session resumes it), clear 'modified', then run.
+  vim.api.nvim_create_autocmd("BufWriteCmd", {
     buffer = 0,
     callback = function()
+      if vim.g.nsql_tmpfile and vim.g.nsql_tmpfile ~= "" then
+        pcall(vim.fn.writefile, vim.api.nvim_buf_get_lines(0, 0, -1, false), vim.g.nsql_tmpfile)
+      end
+      vim.bo.modified = false
       if not vim.g.nsql_tearing then
         run()
       end
     end,
   })
+
+  -- Quit with a CLEAN, unbranded prompt. We intercept :q / :wq / :x / :qa / ZZ so the
+  -- unsaved-changes dialog is exactly "Save changes?" — never a buffer name or a temp
+  -- path. (`persist` mirrors the buffer to the hidden temp file for next-session
+  -- resume; no query is run on the way out.)
+  local function persist()
+    local b = vim.g.nsql_ebuf
+    if b and vim.api.nvim_buf_is_valid(b) and vim.g.nsql_tmpfile and vim.g.nsql_tmpfile ~= "" then
+      pcall(vim.fn.writefile, vim.api.nvim_buf_get_lines(b, 0, -1, false), vim.g.nsql_tmpfile)
+    end
+  end
+  function _G.nsql_quit(save_default)
+    local b = vim.g.nsql_ebuf
+    local modified = b and vim.api.nvim_buf_is_valid(b) and vim.bo[b].modified
+    local save = save_default
+    if modified and not save_default then
+      local c = vim.fn.confirm("Save changes?", "&Yes\n&No\n&Cancel", 3)
+      if c == 0 or c == 3 then
+        return -- Cancel: stay
+      end
+      save = (c == 1) -- Yes saves, No discards
+    end
+    if save then
+      persist()
+    end
+    vim.g.nsql_tearing = true
+    pcall(vim.cmd, "qa!")
+  end
+  -- Intercept the :quit family at <CR> in the command line. Unlike an abbreviation
+  -- (which expands VISIBLY to the lua call), this clears the line and runs the prompt
+  -- silently — the user never sees anything internal. Only an exact whole-command
+  -- match is touched, so `:q!`, `:q 5`, `/search`, every other `:cmd` stay native.
+  local NOSAVE = { q = true, quit = true, qa = true, qall = true, quitall = true }
+  local SAVE = { wq = true, x = true, xit = true, exit = true, wqa = true, wqall = true, xa = true, xall = true }
+  vim.keymap.set("c", "<CR>", function()
+    local ok, repl = pcall(function()
+      if vim.fn.getcmdtype() ~= ":" then return nil end
+      local cl = vim.fn.getcmdline()
+      local save = SAVE[cl]
+      if save or NOSAVE[cl] then
+        vim.schedule(function() pcall(_G.nsql_quit, save == true) end)
+        return "<C-u><CR>" -- clear the line + submit nothing (no command runs, nothing shows)
+      end
+      return nil
+    end)
+    if ok and repl then return repl end
+    return "<CR>"
+  end, { expr = true })
+  vim.keymap.set("n", "ZZ", function() _G.nsql_quit(true) end, o)
+  vim.keymap.set("n", "ZQ", function() vim.g.nsql_tearing = true; pcall(vim.cmd, "qa!") end, o)
 
   -- Custom keys are reserved for FEATURES: run-variants and exports.
   vim.keymap.set("n", ",a", function() run({ all = true }) end, o) -- run all rows

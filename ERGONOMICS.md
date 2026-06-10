@@ -239,6 +239,26 @@ requires plugins, a colorscheme, or a parser.
   the editor. The column header is pinned in the editor statusline (the divider above
   the rows), the row-count summary in the results statusline.
 
+### ✅ Hide nsql's internals (the temp-file path)
+
+The editor is backed by a temp file, but the path must never surface. The buffer is
+switched to a **clean named scratch** (`buftype=acwrite`, named `nsql`); the real
+temp path is remembered privately (`vim.g.nsql_tmpfile`), and `:w` is owned by a
+`BufWriteCmd` that mirrors the buffer to it (for resume), clears `modified`, then
+runs. So nvim only ever shows `nsql` — the statusline and the unsaved-quit prompt
+read **`Save changes to "nsql"?`**, never `…/tmp/nsql-….sql`. Verified: buffer name,
+acwrite, `:w` mirror + `modified=false`, and the path absent from the whole session.
+
+To drop the branding too, the `:q` family (`:q`/`:wq`/`:x`/`:qa`/`ZZ`) shows our own
+`confirm("Save changes?")` — exactly **`Save changes?` (Y)es (N)o (C)ancel**, no name
+at all. `Yes` mirrors to the temp file (resume), `No` discards, `Cancel` stays; then
+`qa!`. It's done by intercepting **`<CR>` in the command line** (not a `cnoreabbrev` —
+that expands *visibly* to `:lua _G.nsql_quit(…)`, leaking internals): when the whole
+command is an exact quit, we clear the line + submit nothing and `vim.schedule` the
+prompt, so nothing internal ever shows. `:q!`, `:q 5`, `/search`, and every other
+`:cmd` pass straight through. Verified over pty: clean prompt, no `:lua` leak, `:w`
+still runs, `No` quits.
+
 ### ✅ Two-bar "moving main header" layout (refined)
 
 The badge bar is back in nvim's statuslines, but as **at most two bars** that move
