@@ -208,6 +208,53 @@ the full result is still exportable / re-runnable).
   "1988 more rows" was actually lines. Now: query echo + first 10 rows borderless +
   ONE honest line (`-- first 1000 rows (capped) · ,a or nsql -e for all`).
 
+### ✅ Portability principle + `--safe` + badge bar
+
+**Principle (load-bearing): nsql's features must never be locked behind the user's
+nvim config.** nsql loads the user's real config (familiar editing) and layers its
+own features on top via `inject.lua` — but every feature has a **config-independent
+baseline**, and plugin integrations are *additive enhancements* that activate only
+when present:
+
+| feature | baseline (bare nvim / SSH) | enhancement (if present) |
+|---|---|---|
+| completion | omnifunc + built-in auto-popup | blink.cmp source / cmp `omni` |
+| schema highlight | `matchadd` | treesitter (`:TSInstall sql`) |
+| status bar | nvim statusline + **explicit hex** badge colours | your colorscheme overrides |
+| results | nvim scratch buffer (core) + OSC-52 yank | — |
+| safety | **`--safe` guard enforced in Rust** | — |
+
+So a `curl|sh` / `yay` / `apt` install on a bare server behaves identically — nothing
+requires plugins, a colorscheme, or a parser.
+
+- **`--safe`** sets the session read-only (`profile.readonly`), the existing guard
+  refuses non-SELECT, enforced Rust-side. Visual reminder: a green **SAFE** badge.
+- **Badge bar:** the editor statusline is now coloured **badges only** — db name
+  (`NsqlDb`), `SAFE` (`NsqlSafe`), `PROD` (`NsqlProd`), explicit hex so they're
+  identical everywhere. No `nsql ·`, no connection string, no key hints.
+- **`,h` keys / `,i` connection** floats (plain nvim, work anywhere) replace the bar
+  hints; the bar just points to them.
+- **Bottom pane hidden until the first result** — the results split is created
+  lazily (`nsql_ensure_rwin`, `laststatus=1`), so until you run something there's just
+  the editor. The column header is pinned in the editor statusline (the divider above
+  the rows), the row-count summary in the results statusline.
+
+### ✅ nsql draws its own bar + portable-over-SSH (decided + done)
+
+- **nsql draws the badge bar itself** (ratatui, `build_status_bar`, top row; nvim
+  attaches at `view_h - 1`). Guaranteed visible — a statusline plugin can never hide
+  the SAFE badge. Explicit hex colours. The editor statusline is freed for the sticky
+  header.
+- **Portable mode** (`--clean`, auto over SSH via `$SSH_TTY`/`$SSH_CONNECTION`,
+  `--no-clean` opts out): spawn `nvim -u nsql_init.lua` — nsql's bundled minimal config
+  (`assets/nsql_init.lua`) instead of the user's. Enables filetype/syntax for SQL,
+  loads no plugins; inject.lua supplies every feature. So a bare `apt`/`yay` box
+  behaves identically. Verified: omnifunc + SQL syntax + `,h` all work config-less.
+- **Removed the built-in auto-popup.** Feeding `<C-x><C-o>` on every keystroke fought
+  whole-word typing and *doubled characters* (`inv`→`invv`) — a real bug caught in
+  pty. Completion is now on-demand (`<C-x><C-o>`) or through the engine's own UI (the
+  blink source); typing is never disturbed.
+
 ### ✅ Bug: inline ad-hoc passwords now survive resume
 
 `nsql postgres://user:pw@host/db` used to connect fine but break on bare-`nsql`

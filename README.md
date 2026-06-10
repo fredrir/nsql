@@ -33,11 +33,11 @@ echo "select 'hi' as greeting" | ./target/debug/nsql
 
 # the main event: a persistent inline session in your real neovim
 ./target/debug/nsql                # opens nvim; the session stays open
+./target/debug/nsql --safe         # read-only session: refuses writes + a green SAFE badge
 #   :w   -> run the statement under the cursor (write = execute; :wq runs + quits)
 #   q    -> toggle into the results window (hjkl to move, y to copy clean values)
-#   ,a   -> run uncapped       ,R -> force-run on a prod profile
-#   ,j   -> copy result as JSON (OSC 52)        ,c -> as CSV
-#   <C-x><C-o> -> schema-aware completion (live tables/columns from the DB)
+#   ,h   -> keys menu       ,i -> connection info       <C-x><C-o> -> completion
+#   ,a   -> run uncapped    ,R -> force-run on prod   ,j/,c -> copy JSON/CSV
 #   :q :wq :q! ZZ -> quit, the native way (buffer saved for next time)
 ```
 
@@ -88,11 +88,14 @@ Because the results are a **real nvim buffer**, you get all of nvim for free:
   OSC 52 (works over SSH, no `clipboard` setting needed).
 
 The editor uses your **terminal's own background** (only distinct highlights, like a
-selection, paint over it), so it blends in. **nvim's native statuslines** carry the
-context: the editor's bar shows the connection (**prod in red**) and is the divider
-above the results; once a result shows, that bar becomes a **sticky column header**
-(pinned above the scrolling rows) and the connection moves to the bottom bar. The
-temp-file path and "written" noise are hidden.
+selection, paint over it), so it blends in. **nsql draws its own status bar** (top
+row) — coloured **badges**: the database name, plus **SAFE** (green, in `--safe`
+read-only sessions) and **PROD** (red). Because nsql draws it (not nvim's statusline),
+it's guaranteed visible — a statusline plugin can never hide the SAFE badge. Keys live
+in the **`,h`** menu and connection details in **`,i`**, so the bar stays clean. The
+results pane (and its bottom bar) **stay hidden until the first result**; once shown,
+the column header is pinned as the divider above the rows.
+The temp-file path and "written" noise are hidden.
 
 **Native-first keys** — plain run / copy / quit are the vim verbs you already use;
 custom `,`-keys are reserved for *features* (run-variants, exports):
@@ -109,9 +112,9 @@ custom `,`-keys are reserved for *features* (run-variants, exports):
   the background and completes **live** table/column names (tables after `FROM`/`JOIN`,
   a table's columns after `tbl.`, both otherwise — so `select name from cat` completes
   `cat` and `name`). It wires itself into your completion engine automatically: it
-  registers a **blink.cmp** source (and exposes the same via `omnifunc` / `<C-x><C-o>`
-  for nvim-cmp's `omni` source or vanilla nvim, plus a built-in auto-popup when no
-  engine is present). `:NsqlSchema` reports what loaded. Recognised names are also
+  registers a **blink.cmp** source (auto-pops in blink's UI), and exposes the same via
+  `omnifunc` — `<C-x><C-o>`, or nvim-cmp's `omni` source. `:NsqlSchema` reports what
+  loaded. Recognised names are also
   **coloured as you type** — precise **treesitter** highlighting when the `sql` parser
   is installed (`:TSInstall sql`; skips strings/comments), else whole-word `matchadd`
   (`NsqlSchemaTable`→`Type`, `NsqlSchemaColumn`→`Identifier`, both overridable).
@@ -119,8 +122,16 @@ custom `,`-keys are reserved for *features* (run-variants, exports):
   to ~a screenful so your prior work stays visible above it).
 - Errors render in the results buffer; the session keeps going.
 
+**Portable everywhere.** No feature is locked behind your nvim config: each has a
+config-independent baseline (completion via omnifunc, highlighting via `matchadd`,
+badges drawn by nsql in explicit colours, the `--safe` guard in Rust), and plugins
+(blink, treesitter) are additive enhancements. Over **SSH** nsql defaults to its own
+bundled minimal nvim config (`--clean`) so a `curl|sh` / `yay` / `apt` install on a
+bare server behaves identically to your local one (`--no-clean` opts back out).
+
 ```sh
 nsql            # zero-flash persistent session (default)
+nsql --clean    # use nsql's bundled minimal nvim config (auto over SSH)
 nsql --classic  # the transient-child editor (Mode 1) instead
 ```
 
@@ -145,6 +156,8 @@ back to Mode 1 automatically when there's no terminal (e.g. `--edit` while pipin
 | Command | What |
 |---|---|
 | `nsql` | open the zero-flash persistent session (`:w` run · `q` into results · `,j` json · `:wq` quit) |
+| `nsql --safe` | read-only session (refuses writes, green SAFE badge) |
+| `nsql --clean` / `--no-clean` | use nsql's bundled minimal nvim config (auto over SSH) / opt out |
 | `nsql --classic` | use the classic transient-child editor (Mode 1) instead |
 | `nsql --edit` | force the editor even when piping |
 | `nsql -e "<sql>"` / `-f file.sql` / `-F <favorite>` | run without the editor |
@@ -163,7 +176,11 @@ back to Mode 1 automatically when there's no terminal (e.g. `--edit` while pipin
 
 ## Safety (a fast SQL runner is a foot-gun by default)
 
-- `--readonly` profiles refuse non-SELECT statements.
+- **`--safe`** makes the whole session **read-only** — anything but `SELECT`/`EXPLAIN`/
+  `WITH`/`SHOW`/… is refused, enforced in nsql (no editor/config can bypass it), with a
+  green **SAFE** badge as the reminder. Made for SSH-ing into a server you want to be
+  *sure* you can only read from.
+- `--readonly` profiles refuse non-SELECT statements (same guard, per-profile).
 - `--prod` profiles require typing `yes` before a destructive statement
   (`DELETE`/`DROP`/`UPDATE`/…); non-interactively they need `--yes`.
 - Passwords go to the **OS keyring** (`nsql connect --set-password`), never the

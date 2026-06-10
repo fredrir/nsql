@@ -50,7 +50,7 @@ type NvimWriter = Compat<ChildStdin>;
 /// Open the persistent inline session (zero-flash). Queries run IN-SESSION (on
 /// `,r`/`:w`); results render in a bottom pane WITHOUT disturbing the scrollback
 /// above. Returns when the user quits (`,,`/`,q`); the scratch is persisted.
-pub fn compose(paths: &Paths, profile: &Profile) -> Result<()> {
+pub fn compose(paths: &Paths, profile: &Profile, portable: bool) -> Result<()> {
     editor::write_inject(paths)?;
     let scratch = paths.scratch_for(&profile.name);
     let prior = std::fs::read_to_string(&scratch).unwrap_or_default();
@@ -66,7 +66,7 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<()> {
         .build()
         .context("starting embed runtime")?;
 
-    let res = rt.block_on(run_session(paths, &tmp, profile));
+    let res = rt.block_on(run_session(paths, &tmp, profile, portable));
     // Don't block on a query still running on the blocking pool if the user quit
     // mid-query — detach it so quitting is instant.
     rt.shutdown_background();
@@ -96,7 +96,12 @@ enum RunMsg {
 }
 
 /// Drive the embedded nvim session: editor on top, results pane on the bottom.
-async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) -> Result<()> {
+async fn run_session(
+    paths: &Paths,
+    tmp: &std::path::Path,
+    profile: &Profile,
+    portable: bool,
+) -> Result<()> {
     let (cols, rows) = util::term_size();
     let width = cols.max(20);
     // Split the inline region: editor on top (its last row is nvim's own
@@ -105,17 +110,28 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     let total = rows.saturating_sub(2).clamp(8, 30);
     let results_rows = (total / 2).clamp(4, 12);
     let editor_rows = total.saturating_sub(results_rows).max(3);
-    let view_h = editor_rows + results_rows;
+    let view_h = editor_rows + results_rows + 1; // +1 = nsql's own badge bar (row 0)
+    let grid_h = view_h - 1; // nvim's grid sits BELOW our badge bar
+    // nsql draws its own status bar (badges) so it is GUARANTEED visible — never
+    // overridable by a statusline plugin. Built once from the profile (it's static).
+    let mut status_bar = build_status_bar(profile, width as usize);
 
     let mut cmd = Command::new("nvim");
-    cmd.env("NSQL_STATUS", editor::status_line(profile))
+    cmd.env("NSQL_DB", &profile.name)
+        .env("NSQL_URL", util::redact_url(&profile.url))
         .env("NSQL_PROD", if profile.prod { "1" } else { "0" })
+        .env("NSQL_SAFE", if profile.readonly { "1" } else { "0" })
         .env_remove("PGPASSWORD") // don't leak a secret into the editor's env
         .arg("--embed")
         .arg("-n")
         .arg("-i")
-        .arg("NONE")
-        .arg(tmp)
+        .arg("NONE");
+    if portable {
+        // nsql's own minimal config instead of the user's — identical behaviour on a
+        // bare server. inject.lua (below) still supplies every nsql feature.
+        cmd.arg("-u").arg(editor::portable_init_path(paths));
+    }
+    cmd.arg(tmp)
         .arg("-c")
         .arg("setfiletype sql")
         .arg("-c")
@@ -137,7 +153,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     opts.set_rgb(true);
     // Attach at the FULL inline height: nvim owns BOTH windows (editor + results
     // split) and draws them — incl. statuslines — into one global grid we render.
-    nvim.ui_attach(width as i64, view_h as i64, &opts)
+    nvim.ui_attach(width as i64, grid_h as i64, &opts)
         .await
         .map_err(|e| anyhow!("nvim ui_attach failed: {e}"))?;
 
@@ -199,7 +215,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
     )
     .context("creating inline terminal")?;
 
-    let mut grid = Grid::new(width as usize, view_h as usize);
+    let mut grid = Grid::new(width as usize, grid_h as usize);
     let mut last_shape = Shape::Block;
     // Last result pre-rendered for the export keys (,j / ,c).
     let mut result_json: Option<String> = None;
@@ -237,7 +253,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
             dirty = true;
         }
         if dirty {
-            draw_grid(&mut terminal, &grid);
+            draw_grid(&mut terminal, &grid, &status_bar);
         }
         if grid.shape != last_shape {
             last_shape = grid.shape;
@@ -336,8 +352,9 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
                         let _ = nvim.paste(&text, false, -1).await;
                     }
                     Event::Resize(w, _h) => {
-                        grid.resize(w as usize, view_h as usize);
-                        let _ = nvim.ui_try_resize(w as i64, view_h as i64).await;
+                        grid.resize(w as usize, grid_h as usize);
+                        status_bar = build_status_bar(profile, w as usize);
+                        let _ = nvim.ui_try_resize(w as i64, grid_h as i64).await;
                         let _ = terminal.autoresize();
                         let _ = terminal.clear();
                     }
@@ -350,7 +367,7 @@ async fn run_session(paths: &Paths, tmp: &std::path::Path, profile: &Profile) ->
             }
             Some(batch) = redraw_rx.recv() => {
                 apply_redraw(&mut grid, &batch);
-                draw_grid(&mut terminal, &grid);
+                draw_grid(&mut terminal, &grid, &status_bar);
             }
         }
     }
@@ -707,9 +724,10 @@ async fn write_results(
         .await;
 }
 
-/// Lua: create the scratch results buffer + a split window below the editor, wire
-/// native toggle-back-to-editor (`q`/`<Esc>`) and clean-yank-to-clipboard. Returns
-/// the buffer handle. `...` = (results_rows).
+/// Lua: create the scratch results BUFFER (not the window — that's lazy, on the
+/// first result, so the bottom pane + its bar stay hidden until there's something
+/// to show) and wire native toggle-back-to-editor + clean-yank-to-clipboard.
+/// Defines `_G.nsql_ensure_rwin()` to open the split on demand. `...` = (results_rows).
 const SETUP_RESULTS_LUA: &str = r#"
 local results_rows = ...
 local ok, rbuf = pcall(vim.api.nvim_create_buf, false, true)
@@ -718,28 +736,12 @@ vim.bo[rbuf].buftype = 'nofile'
 vim.bo[rbuf].bufhidden = 'hide'
 vim.bo[rbuf].swapfile = false
 vim.bo[rbuf].modifiable = false
-pcall(function() vim.o.cmdheight = 0 end)  -- reclaim the bottom row so the results
-                                           -- statusline sits at the very bottom (nvim 0.8+)
-
-local ew = vim.api.nvim_get_current_win()
-vim.g.nsql_ewin = ew
-vim.cmd('botright ' .. results_rows .. 'split')
-local rw = vim.api.nvim_get_current_win()
-vim.api.nvim_win_set_buf(rw, rbuf)
-vim.wo[rw].number = false
-vim.wo[rw].relativenumber = false
-vim.wo[rw].signcolumn = 'no'
-vim.wo[rw].foldcolumn = '0'
-vim.wo[rw].winfixheight = true
-vim.wo[rw].cursorline = true
-vim.wo[rw].wrap = false
-vim.wo[rw].statusline = ' results — :w to run '
-pcall(vim.api.nvim_set_current_win, ew)  -- focus stays in the editor
-vim.g.nsql_rwin = rw
+pcall(function() vim.o.cmdheight = 0 end)  -- reclaim the bottom row (nvim 0.8+)
+vim.g.nsql_ewin = vim.api.nvim_get_current_win()
 vim.g.nsql_rbuf = rbuf
+vim.g.nsql_rrows = results_rows
 
--- q / <Esc> in the results buffer hop back to the editor (same toggle key as the
--- editor's `q`). The buffer is read-only, so these never clobber a query.
+-- q / <Esc> in the results buffer hop back to the editor (the same toggle key).
 local function back()
   if vim.g.nsql_ewin and vim.api.nvim_win_is_valid(vim.g.nsql_ewin) then
     pcall(vim.api.nvim_set_current_win, vim.g.nsql_ewin)
@@ -749,8 +751,7 @@ local bo = { buffer = rbuf, silent = true }
 pcall(vim.keymap.set, 'n', 'q', back, bo)
 pcall(vim.keymap.set, 'n', '<Esc>', back, bo)
 
--- Any yank in the results buffer → system clipboard via nsql (OSC 52), so a
--- native visual-select + y copies clean values even without 'clipboard' set.
+-- Any yank in the results buffer → system clipboard via nsql (OSC 52).
 pcall(vim.api.nvim_create_autocmd, 'TextYankPost', {
   buffer = rbuf,
   callback = function()
@@ -760,17 +761,45 @@ pcall(vim.api.nvim_create_autocmd, 'TextYankPost', {
     if ch and txt ~= '' then pcall(vim.rpcnotify, ch, 'nsql_yank', txt) end
   end,
 })
+
+-- Open the results split below the editor on demand (first result). Idempotent.
+function _G.nsql_ensure_rwin()
+  local rw = vim.g.nsql_rwin
+  if rw and vim.api.nvim_win_is_valid(rw) and vim.api.nvim_win_get_buf(rw) == rbuf then
+    return rw
+  end
+  local ew = vim.api.nvim_get_current_win()
+  vim.cmd('botright ' .. (vim.g.nsql_rrows or 10) .. 'split')
+  rw = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(rw, rbuf)
+  vim.wo[rw].number = false
+  vim.wo[rw].relativenumber = false
+  vim.wo[rw].signcolumn = 'no'
+  vim.wo[rw].foldcolumn = '0'
+  vim.wo[rw].winfixheight = true
+  vim.wo[rw].cursorline = true
+  vim.wo[rw].wrap = false
+  pcall(vim.api.nvim_set_current_win, ew)  -- focus stays in the editor
+  vim.g.nsql_rwin = rw
+  return rw
+end
 return rbuf
 "#;
 
-/// Lua: replace the results buffer contents, repaint type colours, and re-aim the
-/// two status bars. `...` = (rbuf, lines[], marks[], header). When `header` is
-/// non-empty (a real result) the EDITOR statusline becomes a sticky column header
-/// and the bottom bar becomes the main bar (connection + actions); otherwise the
-/// connection stays in the editor bar.
+/// Lua: write the result into the buffer, repaint type colours, and (lazily) show
+/// the results window with a sticky column header in its WINBAR and the row-count
+/// summary in its statusline (the bottom bar). The editor's badge statusline is
+/// left untouched. `...` = (rbuf, lines[], marks[], header).
 const WRITE_RESULTS_LUA: &str = r#"
 local rbuf, lines, marks, header = ...
 if not vim.api.nvim_buf_is_valid(rbuf) then return end
+-- For a table result the last line is the row-count summary → lift it to the
+-- bottom bar so the buffer holds data only.
+local summary = ''
+if header ~= '' and #lines > 0 then
+  summary = lines[#lines]
+  table.remove(lines)
+end
 vim.bo[rbuf].modifiable = true
 vim.api.nvim_buf_set_lines(rbuf, 0, -1, false, lines)
 vim.bo[rbuf].modifiable = false
@@ -779,26 +808,19 @@ vim.api.nvim_buf_clear_namespace(rbuf, ns, 0, -1)
 for _, m in ipairs(marks) do
   pcall(vim.api.nvim_buf_set_extmark, rbuf, ns, m[1], m[2], { end_col = m[3], hl_group = m[4] })
 end
--- Keep any window showing this buffer scrolled to the top on a fresh result.
-for _, w in ipairs(vim.api.nvim_list_wins()) do
-  if vim.api.nvim_win_get_buf(w) == rbuf then
-    pcall(vim.api.nvim_win_set_cursor, w, { 1, 0 })
+local rw = _G.nsql_ensure_rwin and _G.nsql_ensure_rwin() or nil
+local ew = vim.g.nsql_ewin
+if rw and vim.api.nvim_win_is_valid(rw) then
+  pcall(vim.api.nvim_win_set_cursor, rw, { 1, 0 })
+  local function esc(s) return (s:gsub('%%', '%%%%')) end
+  -- Sticky header in the EDITOR statusline — the divider directly above the rows
+  -- (laststatus=1, so it appears only now that a second window exists). '%<' starts
+  -- it at column 0 to line up with the data.
+  if ew and vim.api.nvim_win_is_valid(ew) then
+    vim.wo[ew].statusline = (header ~= '') and ('%<' .. esc(header)) or ''
   end
-end
--- Re-aim the two bars.
-local function esc(s) return (s:gsub('%%', '%%%%')) end
-local conn = vim.g.nsql_conn or 'nsql'
-local connbar = (vim.g.nsql_prod == 1) and ('%#NsqlProd# PROD %* ' .. esc(conn)) or (' ' .. esc(conn))
-local ew, rw = vim.g.nsql_ewin, vim.g.nsql_rwin
-if header ~= '' then
-  -- The header is a STICKY column header for the rows below it, so it must start
-  -- at screen column 0 — no leading space — to line up with the data (which also
-  -- starts at col 0). '%#StatusLine#' just paints it as a normal statusline.
-  if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = '%<' .. esc(header) end
-  if rw and vim.api.nvim_win_is_valid(rw) then vim.wo[rw].statusline = connbar .. '%= q editor · y yank · ,j json' end
-else
-  if ew and vim.api.nvim_win_is_valid(ew) then vim.wo[ew].statusline = connbar .. '%= :w run · q results' end
-  if rw and vim.api.nvim_win_is_valid(rw) then vim.wo[rw].statusline = ' results' end
+  vim.wo[rw].statusline = (summary ~= '') and (' ' .. esc(summary) .. '%= q editor · y yank ')
+    or ' results '
 end
 "#;
 
@@ -1090,26 +1112,55 @@ fn translate_key(k: KeyEvent) -> Option<String> {
     }
 }
 
-/// Render the whole inline region: nvim's global grid — the editor window, its
-/// statusline (the connection/divider bar), the results split below, and that
-/// window's statusline. The scrollback above is never touched. The cursor follows
-/// nvim's focused window, so moving into the results pane Just Works visually.
+/// Render the inline region: row 0 is nsql's own **badge bar** (drawn by us, so it
+/// can never be hidden by a statusline plugin), and below it nvim's global grid —
+/// the editor, the (lazy) results split, and their bars. The scrollback above is
+/// never touched. The cursor follows nvim's focused window (offset by the bar row).
 fn draw_grid(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     grid: &Grid,
+    status_bar: &Line<'static>,
 ) {
     let _ = terminal.draw(|frame| {
         let area = frame.area();
         let w = area.width as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(area.height as usize);
-        for row in grid.cells.iter().take(area.height as usize) {
+        lines.push(status_bar.clone()); // row 0 — nsql badge bar
+        let grid_rows = (area.height as usize).saturating_sub(1);
+        for row in grid.cells.iter().take(grid_rows) {
             lines.push(render_row(grid, row, w));
         }
         frame.render_widget(Paragraph::new(Text::from(lines)), area);
+        // The cursor lives in nvim's grid, which starts at row 1 (below our bar).
         let cx = (grid.cursor.0 as u16).min(area.width.saturating_sub(1));
-        let cy = (grid.cursor.1 as u16).min(area.height.saturating_sub(1));
+        let cy = (grid.cursor.1 as u16 + 1).min(area.height.saturating_sub(1));
         frame.set_cursor_position(Position::new(area.x + cx, area.y + cy));
     });
+}
+
+/// Build nsql's badge bar from the profile (explicit colours → identical on a bare
+/// server). DB name, then SAFE (read-only) and PROD when they apply; `,h`/`,i` hints
+/// right-aligned. nsql draws this itself, so it's guaranteed visible.
+fn build_status_bar(profile: &Profile, width: usize) -> Line<'static> {
+    let ink = Color::Rgb(0x1a, 0x1b, 0x26);
+    let badge = |text: String, bg: Color| {
+        Span::styled(text, Style::default().fg(ink).bg(bg).add_modifier(Modifier::BOLD))
+    };
+    let mut spans: Vec<Span<'static>> = vec![badge(format!(" {} ", profile.name), Color::Rgb(0x7a, 0xa2, 0xf7))];
+    if profile.readonly {
+        spans.push(Span::raw(" "));
+        spans.push(badge(" SAFE ".to_string(), Color::Rgb(0x9e, 0xce, 0x6a)));
+    }
+    if profile.prod {
+        spans.push(Span::raw(" "));
+        spans.push(badge(" PROD ".to_string(), Color::Rgb(0xf7, 0x76, 0x8e)));
+    }
+    let hint = ",h help · ,i info ";
+    let left: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad = width.saturating_sub(left + hint.chars().count());
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+    Line::from(spans)
 }
 
 /// Build one styled line, coalescing runs of cells that share a highlight.

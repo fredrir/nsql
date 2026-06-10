@@ -98,6 +98,14 @@ fn real_main() -> Result<()> {
         }
     };
 
+    // `--safe` upgrades the session to read-only regardless of the profile — the
+    // guard then refuses anything but SELECT/EXPLAIN/…. Enforced in Rust, so no
+    // editor/config can bypass it; the SAFE badge is just the visual reminder.
+    let mut profile = profile;
+    if cli.safe {
+        profile.readonly = true;
+    }
+
     // Remember interactively-chosen connections so bare `nsql` resumes them. Skip
     // scripted one-shots (`-e`/`-f`/stdin pipes) so scripts don't pin connections.
     let scripted =
@@ -300,6 +308,11 @@ mod tests {
 /// `--classic` (or a non-tty / a build without the feature) uses the proven
 /// transient-child editor (Mode 1).
 fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
+    // Portable mode: nsql's own minimal nvim config (so features never depend on the
+    // box's nvim setup). On by default over SSH; `--clean` forces it, `--no-clean`
+    // opts out. The remote behaves identically to your local install.
+    let portable = if cli.no_clean { false } else { cli.clean || is_ssh() };
+
     #[cfg(feature = "embed-editor")]
     {
         let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -309,7 +322,7 @@ fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
         // Inline zero-flash session: the default on a real terminal, unless
         // --classic. The session runs queries itself and returns Handled.
         if (cli.embed || !cli.classic) && is_tty {
-            embed::compose(paths, profile)?;
+            embed::compose(paths, profile, portable)?;
             return Ok(Acquired::Handled);
         }
     }
@@ -318,10 +331,15 @@ fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
         anyhow::bail!("--embed requires building with `--features embed-editor`");
     }
 
-    Ok(match editor::compose(paths, profile)? {
+    Ok(match editor::compose(paths, profile, portable)? {
         Some(sql) => Acquired::Run { sql, echo: true },
         None => Acquired::Cancelled,
     })
+}
+
+/// Are we in an SSH session? (Then default to nsql's portable nvim config.)
+fn is_ssh() -> bool {
+    std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some()
 }
 
 fn run_subcommand(

@@ -185,28 +185,11 @@ pcall(function()
     end
   end, {})
 
-  -- (3) vanilla auto-popup — ONLY when no completion engine is active (re-checked
-  -- each keystroke so a lazily-loaded engine takes over and we never fight it).
-  local function has_engine()
-    return package.loaded["cmp"]
-      or package.loaded["blink.cmp"] or package.loaded["blink"]
-      or package.loaded["coc.nvim"] or vim.g.loaded_coc ~= nil
-      or package.loaded["mini.completion"] or vim.g.loaded_ddc ~= nil
-  end
-  vim.api.nvim_create_autocmd("TextChangedI", {
-    buffer = 0,
-    callback = function()
-      if has_engine() or vim.fn.pumvisible() == 1 or not _G.nsql_schema then
-        return
-      end
-      local col = vim.api.nvim_win_get_cursor(0)[2]
-      local before = vim.api.nvim_get_current_line():sub(1, col)
-      if before:match("[%w_][%w_]$") or before:match("[%w_]%.$") then
-        vim.api.nvim_feedkeys(
-          vim.api.nvim_replace_termcodes("<C-x><C-o>", true, true, true), "n", false)
-      end
-    end,
-  })
+  -- (No auto-firing of completion: feeding <C-x><C-o> on every keystroke fights the
+  -- way you type whole identifiers and can double characters. Completion is on
+  -- DEMAND — <C-x><C-o> — or automatic through your engine's own UI via the source
+  -- above. A vanilla-nvim auto-popup would need careful completeopt handling; out
+  -- for now so typing is never disturbed.)
 
   -- Native quit (:q / :wq / :q! / ZZ) ends the WHOLE session. The results split
   -- auto-closes when it becomes the last window, so quitting the editor leaves
@@ -226,26 +209,73 @@ pcall(function()
   })
 end)
 
--- Status bars: nsql's NATIVE statuslines. Initially the editor statusline is the
--- main bar (connection; prod in red). Once a result is shown, nsql flips the roles
--- (editor bar → sticky column header, bottom bar → connection). We also hide the
--- temp-file path and the "N lines written" noise.
+-- nsql draws the badge bar ITSELF (row 0, in Rust) so it's guaranteed visible.
+-- Here we just: stash the connection facts for the ,i menu, hide nvim's noise, and
+-- keep the editor statusline clean (it becomes the sticky column header once a
+-- result shows). laststatus=1 → no statuslines until the results split exists, so
+-- the bottom bar stays hidden until there's something to show.
 pcall(function()
   vim.opt.shortmess:append("WFI") -- no "written", no file-info intro, no intro
-  vim.o.laststatus = 2 -- ensure the statusline (divider) is always shown
+  vim.o.laststatus = 1 -- statuslines appear only once there are 2 windows (a result)
   vim.o.ruler = false
+  vim.wo.statusline = "" -- never the temp-file path; WRITE sets the header on results
 
-  local status = vim.env.NSQL_STATUS or "nsql"
-  local prod = vim.env.NSQL_PROD == "1"
-  vim.g.nsql_conn = status
-  vim.g.nsql_prod = prod and 1 or 0
-  if prod then
-    pcall(vim.api.nvim_set_hl, 0, "NsqlProd", { fg = "#ff5555", bold = true })
+  vim.g.nsql_db = vim.env.NSQL_DB or "db"
+  vim.g.nsql_url = vim.env.NSQL_URL or ""
+  vim.g.nsql_prod = (vim.env.NSQL_PROD == "1") and 1 or 0
+  vim.g.nsql_safe = (vim.env.NSQL_SAFE == "1") and 1 or 0
+end)
+
+-- ,h / ,i menus: keep the bar clean; surface keys + connection info on demand in a
+-- small float (plain nvim, works anywhere). q / <Esc> dismiss.
+pcall(function()
+  local function float(title, lines)
+    local w = #title + 2
+    for _, l in ipairs(lines) do w = math.max(w, vim.fn.strdisplaywidth(l) + 2) end
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].bufhidden = "wipe"
+    local win = vim.api.nvim_open_win(buf, true, {
+      relative = "editor",
+      width = w,
+      height = #lines,
+      row = math.max(0, math.floor((vim.o.lines - #lines) / 2)),
+      col = math.max(0, math.floor((vim.o.columns - w) / 2)),
+      style = "minimal",
+      border = "rounded",
+      title = " " .. title .. " ",
+      title_pos = "center",
+    })
+    pcall(function() vim.wo[win].winhl = "Normal:NormalFloat,FloatBorder:FloatBorder" end)
+    local bo = { buffer = buf, silent = true }
+    vim.keymap.set("n", "q", "<cmd>close<cr>", bo)
+    vim.keymap.set("n", "<Esc>", "<cmd>close<cr>", bo)
   end
 
-  local function esc(s)
-    return (s:gsub("%%", "%%%%")) -- % is special in 'statusline'
-  end
-  local connbar = prod and ("%#NsqlProd# PROD %* " .. esc(status)) or (" " .. esc(status))
-  vim.wo.statusline = connbar .. "%= :w run · q results"
+  vim.keymap.set("n", ",h", function()
+    float("nsql · keys", {
+      "  :w            run the statement under the cursor (:wq runs + quits)",
+      "  q             toggle between the editor and the results window",
+      "  <C-x><C-o>    schema-aware completion (tables & columns)",
+      "  ,a            run uncapped (all rows)",
+      "  ,R            run on a prod profile (force past the guard)",
+      "  ,j  /  ,c     copy the last result as JSON / CSV",
+      "  ,h  /  ,i     this help  /  connection info",
+      "  :q :wq :q! ZZ quit (your buffer is saved for next time)",
+    })
+  end, o)
+
+  vim.keymap.set("n", ",i", function()
+    local s = _G.nsql_schema
+    local schema = s and (("%d tables, %d columns"):format(#(s.tables or {}), #(s.columns or {})))
+      or "loading…"
+    local mode = (vim.g.nsql_safe == 1) and "read-only (SAFE)" or "read / write"
+    float("nsql · connection", {
+      "  database   " .. (vim.g.nsql_db or "?"),
+      "  url        " .. (vim.g.nsql_url or "?"),
+      "  mode       " .. mode .. ((vim.g.nsql_prod == 1) and "   ⚠ PROD" or ""),
+      "  schema     " .. schema,
+    })
+  end, o)
 end)

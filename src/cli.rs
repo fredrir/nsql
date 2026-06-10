@@ -65,6 +65,18 @@ pub struct Cli {
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
 
+    /// Read-only session: refuse anything but SELECT/EXPLAIN/… (great over SSH on a
+    /// server you want to be SURE you can't mutate). Shows a green SAFE badge.
+    #[arg(long = "safe")]
+    pub safe: bool,
+
+    /// Use nsql's own minimal nvim config instead of yours (guaranteed-identical
+    /// behaviour anywhere). On by default over SSH; `--no-clean` opts back out.
+    #[arg(long = "clean", overrides_with = "no_clean")]
+    pub clean: bool,
+    #[arg(long = "no-clean", overrides_with = "clean", hide = true)]
+    pub no_clean: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

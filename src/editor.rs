@@ -17,17 +17,6 @@ use crate::util::{self, EditorKind};
 use anyhow::{Context, Result};
 use std::process::Command;
 
-/// A one-line, secret-free status (active profile + redacted url). Passed to the
-/// editor via $NSQL_STATUS and shown as *virtual text* above the buffer — never
-/// as buffer content, so the editing area stays clean.
-pub(crate) fn status_line(profile: &Profile) -> String {
-    format!(
-        "nsql \u{b7} {} \u{b7} {}",
-        profile.name,
-        util::redact_url(&profile.url)
-    )
-}
-
 fn is_header_line(line: &str) -> bool {
     line.starts_with("-- nsql \u{b7}") || line.starts_with("-- ,, = run")
 }
@@ -40,7 +29,9 @@ pub(crate) fn strip_header(text: &str) -> String {
 }
 
 /// Open the editor, returning `Some(sql)` to run or `None` to cancel / no-op.
-pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
+/// `portable` (over SSH / `--clean`) launches nvim with nsql's bundled minimal
+/// config instead of the user's.
+pub fn compose(paths: &Paths, profile: &Profile, portable: bool) -> Result<Option<String>> {
     write_inject(paths)?;
 
     let scratch = paths.scratch_for(&profile.name);
@@ -56,14 +47,19 @@ pub fn compose(paths: &Paths, profile: &Profile) -> Result<Option<String>> {
     let mut cmd = Command::new(&program);
     // Don't leak a connection secret into the editor's env (its plugins could
     // read it); nsql passes connections to any LSP explicitly, not via PGPASSWORD.
-    cmd.env("NSQL_STATUS", status_line(profile))
+    cmd.env("NSQL_DB", &profile.name)
+        .env("NSQL_URL", util::redact_url(&profile.url))
         .env("NSQL_PROD", if profile.prod { "1" } else { "0" })
+        .env("NSQL_SAFE", if profile.readonly { "1" } else { "0" })
         .env_remove("PGPASSWORD");
     match kind {
         EditorKind::Nvim => {
-            cmd.arg("-i")
-                .arg("NONE") // disable shada (NOT `--cmd 'set shada=NONE'`, which throws E539)
-                .arg(&tmp)
+            cmd.arg("-i").arg("NONE"); // disable shada (NOT `--cmd 'set shada=NONE'`, throws E539)
+            if portable {
+                // nsql's own minimal config instead of the user's (identical anywhere).
+                cmd.arg("-u").arg(portable_init_path(paths));
+            }
+            cmd.arg(&tmp)
                 .arg("-c")
                 .arg("setfiletype sql")
                 .arg("-c")
@@ -111,11 +107,20 @@ pub(crate) fn persist_scratch(path: &std::path::Path, body: &str) -> Result<()> 
 }
 
 const INJECT_LUA: &str = include_str!("../assets/inject.lua");
+const INIT_LUA: &str = include_str!("../assets/nsql_init.lua");
 
 pub(crate) fn write_inject(paths: &Paths) -> Result<()> {
     std::fs::write(&paths.inject_lua, INJECT_LUA)
         .with_context(|| format!("writing {}", paths.inject_lua.display()))?;
+    std::fs::write(portable_init_path(paths), INIT_LUA)
+        .with_context(|| "writing nsql_init.lua")?;
     Ok(())
+}
+
+/// Path to nsql's bundled minimal nvim config (used in `--clean` / over-SSH mode),
+/// written next to inject.lua.
+pub(crate) fn portable_init_path(paths: &Paths) -> std::path::PathBuf {
+    paths.inject_lua.with_file_name("nsql_init.lua")
 }
 
 #[cfg(test)]
