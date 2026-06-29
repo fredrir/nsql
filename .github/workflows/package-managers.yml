@@ -1,11 +1,5 @@
 name: Package managers
 
-# Runs AFTER cargo-dist's release.yml has built artifacts and published the
-# GitHub Release. Publishes the channels dist does not cover: crates.io, the AUR
-# (source + binary), and a signed apt repo on GitHub Pages. Homebrew is handled
-# by release.yml's publish-homebrew-formula job.
-#
-# Each job is independent: a missing secret fails only that channel.
 on:
   release:
     types: [published]
@@ -40,8 +34,6 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
 
-  # crates.io publishes are permanent, so only real (non-prerelease) releases —
-  # never a manual dispatch or an -rc tag.
   crates-io:
     name: Publish to crates.io
     needs: meta
@@ -74,7 +66,6 @@ jobs:
         run: |
           sed -i "s/^pkgver=.*/pkgver=${{ needs.meta.outputs.version }}/" \
             "packaging/aur/${{ matrix.pkg }}/PKGBUILD"
-      # Recomputes sha256sums, regenerates .SRCINFO, and pushes to the AUR.
       - name: Deploy ${{ matrix.pkg }}
         uses: KSXGitHub/github-actions-deploy-aur@v4
         with:
@@ -142,9 +133,6 @@ jobs:
           publish_branch: gh-pages
           commit_message: "apt: nsql ${{ needs.meta.outputs.version }}"
 
-  # The prebuilt linux-gnu binary dynamically links libdbus (keyring-store).
-  # cargo-dist's formula doesn't declare it, so patch the tap to add a
-  # Linux-only dependency. macOS uses the Security framework and is unaffected.
   homebrew-linux-dep:
     name: Declare libdbus dep in Homebrew formula (Linux)
     needs: meta
@@ -156,8 +144,6 @@ jobs:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
-          # release.yml pushes the formula before publishing the release (which
-          # triggers this workflow), but retry a few times to be safe.
           f=""
           for i in 1 2 3 4 5 6; do
             rm -rf tap

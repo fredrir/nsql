@@ -1,0 +1,52 @@
+name: Auto release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: ${{ !startsWith(github.event.head_commit.message, 'release:') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+      - id: v
+        run: |
+          set -euo pipefail
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$latest" ]; then
+            next=$(sed -nE '0,/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/s//\1/p' Cargo.toml)
+          else
+            v=${latest#v}
+            major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}; patch=${rest##*.}
+            next="$major.$minor.$((patch+1))"
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+      - run: |
+          set -euo pipefail
+          next='${{ steps.v.outputs.next }}'
+          if git rev-parse "v$next" >/dev/null 2>&1; then
+            echo "v$next already exists; nothing to do"
+            exit 0
+          fi
+          sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$next\"/" Cargo.toml
+          awk -v ver="$next" 'BEGIN{f=0} /^name = "nsql"$/{f=1} f && /^version = /{sub(/"[^"]*"/,"\"" ver "\"");f=0} {print}' Cargo.lock > Cargo.lock.new
+          mv -f Cargo.lock.new Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "release: v$next"
+            git push origin HEAD:main
+          fi
+          git tag -a "v$next" -m "v$next"
+          git push origin "v$next"

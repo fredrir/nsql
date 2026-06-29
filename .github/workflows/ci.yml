@@ -14,14 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # keyring-store (default feature) links system libdbus.
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Optional
       - name: rustfmt (advisory)
         continue-on-error: true
         run: cargo fmt --all -- --check
@@ -38,7 +36,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Default features:
       - name: test (default features)
         run: cargo test --all-targets
       - name: build (no default features)
