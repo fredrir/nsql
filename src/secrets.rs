@@ -1,12 +1,3 @@
-//! Credential storage via the OS keychain (Secret Service / libsecret on Linux,
-//! macOS Keychain, Windows Credential Manager). Plaintext passwords never touch
-//! the config file. Feature-gated behind `keyring-store` so the tool still
-//! builds where the secret-service stack is unavailable.
-//!
-//! Resolution order for an actual connection password (Phase 2, once non-sqlite
-//! backends are wired) should be: explicit URI > env (PG*/DATABASE_URL) >
-//! ~/.pgpass > OS keyring (here) > external managers (op://, pass).
-
 #[cfg(feature = "keyring-store")]
 const SERVICE: &str = "nsql";
 

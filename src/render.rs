@@ -1,10 +1,3 @@
-//! Render results to the NORMAL screen (never the alternate screen).
-//!
-//! Every textual cell goes through `sanitize`, which neutralises control bytes
-//! (ESC, CR, NUL, …). This is a security boundary, not cosmetics: a bytea/text
-//! column can itself contain `ESC[?1049h` and would otherwise break the
-//! no-alternate-screen guarantee straight from the data.
-
 use crate::cli::{Cli, FormatArg};
 use crate::db::{Cell, QueryResult};
 use crate::{pager, util};
@@ -27,10 +20,7 @@ pub enum Format {
 pub struct Options {
     pub format: Format,
     pub is_tty: bool,
-    /// When set, the SQL is echoed as `-- ` comments above the result so the
-    /// query and its output sit together in scrollback (psql-style).
     pub echo: Option<String>,
-    /// Wall-clock for the query; shown in the human footer (`5 rows in 12ms`).
     pub elapsed: Option<std::time::Duration>,
 }
 
@@ -64,7 +54,6 @@ impl Options {
 
     fn resolved(&self) -> Format {
         match self.format {
-            // Auto: human table on a tty, machine-friendly tsv when piped.
             Format::Auto => {
                 if self.is_tty {
                     Format::Table
@@ -81,12 +70,8 @@ pub fn print(result: &QueryResult, opts: &Options) -> Result<()> {
     pager::emit(&format(result, opts), opts.is_tty)
 }
 
-/// Render a result to a String (no paging, no I/O). Used by `print` and by the
-/// in-session results pane (which renders without ever touching the pager).
 pub fn format(result: &QueryResult, opts: &Options) -> String {
     let fmt = opts.resolved();
-    // Human formats get the query echo, a row-count footer, and cap notes.
-    // Machine formats (tsv/csv/json) stay clean so they pipe into jq/etc.
     let human = matches!(fmt, Format::Table | Format::Expanded);
     let timing = opts
         .elapsed
@@ -136,8 +121,6 @@ pub fn format(result: &QueryResult, opts: &Options) -> String {
                     if n == 1 { "" } else { "s" }
                 );
             }
-            // NOTE: never write to stderr here — this is a pure formatter, and in
-            // the inline session stderr would corrupt the editor region.
         }
     }
 
@@ -145,8 +128,6 @@ pub fn format(result: &QueryResult, opts: &Options) -> String {
 }
 
 fn render_table(out: &mut String, columns: &[String], rows: &[Vec<Cell>]) {
-    // Zero-row results from the Postgres simple protocol carry no column names;
-    // skip drawing an empty box and let the "(0 rows)" footer speak.
     if columns.is_empty() {
         return;
     }
@@ -278,8 +259,6 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-/// Neutralise control characters so data can never emit terminal escapes or
-/// break table/row layout. Newlines/tabs become visible escapes.
 pub fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -314,7 +293,6 @@ mod tests {
 
     #[test]
     fn sanitize_neutralises_escape() {
-        // An ESC that would otherwise switch to the alternate screen.
         let evil = "\x1b[?1049h";
         let clean = sanitize(evil);
         assert!(!clean.contains('\x1b'));

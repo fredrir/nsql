@@ -1,5 +1,3 @@
-//! SQLite backend (rusqlite, bundled — no system lib, no network, sync).
-
 use crate::db::{Cell, QueryResult, ROW_CAP};
 use anyhow::{Context, Result};
 
@@ -12,7 +10,6 @@ pub fn run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
         rusqlite::Connection::open(target)
     }
     .with_context(|| format!("opening sqlite database `{target}`"))?;
-    // A locked db file blocks the session otherwise; fail after a bounded wait.
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
 
     let trimmed = sql.trim();
@@ -20,8 +17,6 @@ pub fn run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
     let ncol = stmt.column_count();
 
     if ncol == 0 {
-        // Non-row statement(s): DML/DDL. Run the whole buffer as a batch so
-        // multi-statement scripts work, and report affected rows.
         drop(stmt);
         conn.execute_batch(trimmed).context("executing SQL")?;
         return Ok(QueryResult::Affected {

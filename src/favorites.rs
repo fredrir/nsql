@@ -1,12 +1,8 @@
-//! Favorites are just named .sql files under the data dir — greppable,
-//! git-friendly, editable in your own editor, zero lock-in.
-
 use crate::config::Paths;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
 fn path_for(paths: &Paths, name: &str) -> Result<PathBuf> {
-    // Refuse path traversal / separators in the favorite name.
     if name.is_empty() || name.contains('/') || name.contains("..") {
         bail!("invalid favorite name `{name}`");
     }

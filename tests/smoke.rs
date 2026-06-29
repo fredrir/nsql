@@ -1,12 +1,7 @@
-//! End-to-end smoke tests, including the load-bearing invariant: nsql must
-//! NEVER emit the alternate-screen escape for its own output. If any code path
-//! starts emitting `ESC[?1049h`, these tests fail — that's the whole point of
-//! the tool.
-
 use std::path::PathBuf;
 use std::process::Command;
 
-const SMCUP: &str = "\x1b[?1049h"; // switch to alternate screen — must never appear
+const SMCUP: &str = "\x1b[?1049h";
 
 fn unique_dir(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -18,8 +13,6 @@ fn unique_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Run the built binary with an isolated config/data/home, returning
-/// (stdout, stderr, success).
 fn run(args: &[&str], extra_env: &[(&str, &str)], home: &PathBuf) -> (String, String, bool) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nsql"));
     cmd.args(args)
@@ -68,8 +61,6 @@ fn json_output() {
 fn editor_loop_runs_saved_buffer() {
     let home = unique_dir("edit");
 
-    // A fake editor that writes a query into the scratch file and exits 0
-    // (simulating ,, / :wq). This exercises the entire EditorSession pipeline.
     let editor = home.join("fake-editor.sh");
     std::fs::write(
         &editor,
@@ -96,7 +87,6 @@ fn editor_loop_runs_saved_buffer() {
 fn editor_cancel_runs_nothing() {
     let home = unique_dir("cancel");
 
-    // A fake editor that exits non-zero (simulating ,q / :cq).
     let editor = home.join("cancel-editor.sh");
     std::fs::write(&editor, "#!/bin/sh\nexit 1\n").unwrap();
     {
@@ -114,9 +104,6 @@ fn editor_cancel_runs_nothing() {
     assert!(stdout.trim().is_empty(), "cancel should print no result: {stdout}");
 }
 
-/// Runs only when NSQL_TEST_PG_URL points at a reachable Postgres (e.g.
-/// postgres://app:secret@127.0.0.1:55432/app). Skipped otherwise so the suite
-/// stays green without a server.
 #[test]
 fn postgres_backend_when_available() {
     let Ok(url) = std::env::var("NSQL_TEST_PG_URL") else {
@@ -167,7 +154,6 @@ fn adhoc_url_runs_without_a_profile() {
 #[test]
 fn readonly_profile_blocks_writes() {
     let home = unique_dir("ro");
-    // Create a read-only profile, then try a write.
     let (_o, e, ok) = run(
         &[
             "connect",

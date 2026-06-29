@@ -1,18 +1,8 @@
-//! Query execution: shared result types, the safety guard, and the backend
-//! dispatch. Concrete engines live in `backends/`.
-//!
-//! SQLite executes via rusqlite (bundled, sync). Postgres executes via the sync
-//! `postgres` crate using the *simple-query protocol*, which returns every
-//! column as text — so we don't have to decode every Postgres type by hand and
-//! the rendering matches psql exactly (NULL stays distinct from empty).
-
 use crate::backends;
 use crate::config::Profile;
 use crate::util;
 use anyhow::{bail, Result};
 
-/// Default cap so `SELECT * FROM huge_table` doesn't try to render millions of
-/// rows into scrollback. Override with --all.
 pub const ROW_CAP: usize = 1000;
 
 #[derive(Debug)]
@@ -29,7 +19,6 @@ pub enum QueryResult {
     Rows {
         columns: Vec<String>,
         rows: Vec<Vec<Cell>>,
-        /// Set to the number of rows shown when more existed beyond the cap.
         truncated: Option<usize>,
     },
     Affected {
@@ -37,7 +26,6 @@ pub enum QueryResult {
     },
 }
 
-/// Execute `sql` against the profile's database.
 pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
     match profile.scheme() {
         "sqlite" => backends::sqlite::run(&profile.sqlite_target(), sql, all),
@@ -53,8 +41,6 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
     }
 }
 
-/// Remove `-- line comments` and blanks; used to decide whether a buffer is
-/// effectively empty ("nothing to run").
 pub fn strip_sql_comments(sql: &str) -> String {
     sql.lines()
         .map(|l| match l.find("--") {
@@ -65,8 +51,6 @@ pub fn strip_sql_comments(sql: &str) -> String {
         .join("\n")
 }
 
-/// First SQL keyword (skipping leading line comments), upper-cased. Heuristic —
-/// does not parse block comments. Used by the safety guard.
 pub fn first_keyword(sql: &str) -> String {
     for raw in sql.lines() {
         let line = raw.trim();
@@ -82,8 +66,6 @@ pub fn first_keyword(sql: &str) -> String {
     String::new()
 }
 
-/// Safety rails for a "fast SQL runner": block writes on read-only profiles and
-/// require confirmation for destructive statements on prod-tagged profiles.
 pub fn guard(profile: &Profile, sql: &str, assume_yes: bool, is_tty: bool) -> Result<()> {
     let kw = first_keyword(sql);
 

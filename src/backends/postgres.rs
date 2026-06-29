@@ -1,15 +1,3 @@
-//! Postgres backend (sync `postgres` crate — blocking wrapper over
-//! tokio-postgres, so no async refactor and still a single binary).
-//!
-//! We use the *simple-query protocol* (`simple_query`): the server returns every
-//! column already formatted as text, exactly like psql. That sidesteps generic
-//! per-type binary decoding entirely, and NULL stays distinct from empty string.
-//! Trade-off (Phase 3): values arrive as Postgres' canonical text rather than
-//! typed, and binding parameters isn't available — fine for ad-hoc SQL.
-//!
-//! Password resolution (when the URL has none): PGPASSWORD env > OS keyring.
-//! TLS is not configured yet (NoTls) — managed cloud DBs needing SSL are Phase 3.
-
 use crate::config::Profile;
 use crate::db::{first_keyword, Cell, QueryResult, ROW_CAP};
 use crate::util::{self, url_has_password};
@@ -25,14 +13,12 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
             cfg.password(pw);
         }
     }
-    // Bound the connect so an unreachable host fails fast instead of hanging.
     cfg.connect_timeout(std::time::Duration::from_secs(8));
 
     let mut client = cfg
         .connect(postgres::NoTls)
         .with_context(|| format!("connecting to {}", util::redact_url(&profile.url)))?;
 
-    // Bound a runaway query (cartesian join, scan of a huge table) server-side.
     let _ = client.simple_query("SET statement_timeout = '30s'");
 
     let messages = client.simple_query(sql.trim()).context("executing SQL")?;
@@ -71,9 +57,6 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
         }
     }
 
-    // A zero-row SELECT yields no Row messages (and the simple protocol gives us
-    // no column names in that case) — still report it as an (empty) result set
-    // rather than "0 rows affected".
     let kw = first_keyword(sql);
     let query_ish = matches!(
         kw.as_str(),

@@ -1,6 +1,3 @@
-//! nsql — run SQL from your terminal, composed in your real neovim, without
-//! taking over the screen. See DESIGN.md for the architecture and rationale.
-
 mod backends;
 mod cli;
 mod config;
@@ -31,7 +28,6 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    // Allow a leading `@name` anywhere in argv as a shorthand for --profile.
     let mut argv: Vec<String> = std::env::args().collect();
     let mut profile_at: Option<String> = None;
     argv.retain(|a| match a.strip_prefix('@') {
@@ -42,8 +38,6 @@ fn real_main() -> Result<()> {
         _ => true,
     });
 
-    // A leading positional (`nsql postgres://…`, `nsql staging`, `nsql 2`) is a
-    // connection target — pull it out before clap so it isn't read as a subcommand.
     let target = extract_target(&mut argv);
 
     let cli = Cli::parse_from(argv);
@@ -56,15 +50,8 @@ fn real_main() -> Result<()> {
         return run_subcommand(cmd, &paths, &mut cfg, profile_override.as_deref());
     }
 
-    // Resolve the connection: explicit target (URL / recents label / index / saved
-    // profile) > -p/@name > resume the most-recent > the bootstrapped `local`.
     let profile = if let Some(t) = &target {
         if is_db_url(t) {
-            // An inline password in an ad-hoc URL would be lost on resume: recents
-            // stores the URL WITHOUT it (no plaintext on disk). Migrate it into the
-            // OS keyring, keyed on the stable user@host:port/db identity, so bare
-            // `nsql` reconnects. The full URL stays in this session's profile so the
-            // current connection still works immediately.
             if let Some(pw) = util::url_password(t) {
                 if let Some(key) = creds::pg_identity(t).map(|id| creds::identity_key(&id)) {
                     if let Err(e) = secrets::set(&key, &pw) {
@@ -98,16 +85,11 @@ fn real_main() -> Result<()> {
         }
     };
 
-    // `--safe` upgrades the session to read-only regardless of the profile — the
-    // guard then refuses anything but SELECT/EXPLAIN/…. Enforced in Rust, so no
-    // editor/config can bypass it; the SAFE badge is just the visual reminder.
     let mut profile = profile;
     if cli.safe {
         profile.readonly = true;
     }
 
-    // Remember interactively-chosen connections so bare `nsql` resumes them. Skip
-    // scripted one-shots (`-e`/`-f`/stdin pipes) so scripts don't pin connections.
     let scripted =
         cli.execute.is_some() || cli.file.is_some() || cli.favorite.is_some() || !std::io::stdin().is_terminal();
     if target.is_some() || !scripted {
@@ -117,8 +99,6 @@ fn real_main() -> Result<()> {
 
     let out_tty = std::io::stdout().is_terminal();
 
-    // Acquire what to do. The interactive embed session runs queries itself and
-    // returns Handled — nothing for main to run or print.
     let (sql, echo) = match acquire_sql(&cli, &paths, &profile)? {
         Acquired::Handled => return Ok(()),
         Acquired::Cancelled => {
@@ -149,13 +129,9 @@ fn real_main() -> Result<()> {
     render::print(&result, &opts)
 }
 
-/// What `acquire_sql` resolved the invocation to.
 enum Acquired {
-    /// A query for main to run + print (one-shot / classic editor).
     Run { sql: String, echo: bool },
-    /// The user cancelled the editor with nothing to run.
     Cancelled,
-    /// The interactive embed session already ran everything in-session.
     #[cfg_attr(not(feature = "embed-editor"), allow(dead_code))]
     Handled,
 }
@@ -180,7 +156,6 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> 
             echo: true,
         });
     }
-    // No explicit source: read a pipe if present, otherwise open the editor.
     if !std::io::stdin().is_terminal() {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s)?;
@@ -189,7 +164,6 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> 
     compose(paths, profile, cli)
 }
 
-/// True if `s` looks like a database connection URL we can dispatch.
 fn is_db_url(s: &str) -> bool {
     matches!(
         s.split_once("://").map(|(scheme, _)| scheme),
@@ -197,10 +171,6 @@ fn is_db_url(s: &str) -> bool {
     )
 }
 
-/// Pull a leading connection target out of argv — the first positional token (so
-/// it never swallows an option value like `connect --url …`). Returns it unless
-/// it's a subcommand name, which is left for clap. The target may be a URL, a
-/// recents label, a recents index, or a saved-profile name.
 fn extract_target(argv: &mut Vec<String>) -> Option<String> {
     const VALUE_FLAGS: &[&str] = &[
         "-e", "--execute", "-f", "--file", "-F", "--favorite", "-p", "--profile", "--format",
@@ -227,7 +197,6 @@ fn extract_target(argv: &mut Vec<String>) -> Option<String> {
             i += 1;
             continue;
         }
-        // First positional: leave subcommands for clap; otherwise it's a target.
         return if SUBCOMMANDS.contains(&a.as_str()) {
             None
         } else {
@@ -237,7 +206,6 @@ fn extract_target(argv: &mut Vec<String>) -> Option<String> {
     None
 }
 
-/// A short, secret-free label for an ad-hoc connection (the database name).
 fn adhoc_name(url: &str) -> String {
     url.rsplit('/')
         .next()
@@ -270,7 +238,6 @@ mod tests {
 
     #[test]
     fn extracts_label_and_index_targets() {
-        // A bare non-URL positional is a recents label / index, now extracted.
         let mut a = argv(&["staging"]);
         assert_eq!(extract_target(&mut a).as_deref(), Some("staging"));
         let mut b = argv(&["2"]);
@@ -279,10 +246,8 @@ mod tests {
 
     #[test]
     fn does_not_steal_connect_url_or_subcommands() {
-        // The URL here is the value of `--url`, not a bare positional.
         let mut a = argv(&["connect", "prod", "--url", "postgres://u@h/db"]);
         assert_eq!(extract_target(&mut a), None);
-        // Subcommands are left for clap.
         let mut b = argv(&["profiles"]);
         assert_eq!(extract_target(&mut b), None);
     }
@@ -303,14 +268,7 @@ mod tests {
     }
 }
 
-/// Open the compose editor. The zero-flash inline editor is the default when
-/// built with the `embed-editor` feature and stdin/stdout are a real terminal;
-/// `--classic` (or a non-tty / a build without the feature) uses the proven
-/// transient-child editor (Mode 1).
 fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
-    // Portable mode: nsql's own minimal nvim config (so features never depend on the
-    // box's nvim setup). On by default over SSH; `--clean` forces it, `--no-clean`
-    // opts out. The remote behaves identically to your local install.
     let portable = if cli.no_clean { false } else { cli.clean || is_ssh() };
 
     #[cfg(feature = "embed-editor")]
@@ -319,8 +277,6 @@ fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
         if cli.embed && !is_tty {
             anyhow::bail!("--embed needs an interactive terminal");
         }
-        // Inline zero-flash session: the default on a real terminal, unless
-        // --classic. The session runs queries itself and returns Handled.
         if (cli.embed || !cli.classic) && is_tty {
             embed::compose(paths, profile, portable)?;
             return Ok(Acquired::Handled);
@@ -337,7 +293,6 @@ fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
     })
 }
 
-/// Are we in an SSH session? (Then default to nsql's portable nvim config.)
 fn is_ssh() -> bool {
     std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some()
 }
@@ -392,8 +347,6 @@ fn run_subcommand(
             let raw_url = url
                 .or_else(|| existing.as_ref().map(|p| p.url.clone()))
                 .context("a new profile needs --url (e.g. --url sqlite:///path/db.sqlite)")?;
-            // NEVER persist a password to config.toml: strip it from the stored
-            // url and migrate any embedded password into the OS keyring.
             let embedded_pw = util::url_password(&raw_url);
             let profile = Profile {
                 name: name.clone(),
@@ -403,9 +356,6 @@ fn run_subcommand(
                 no_history: existing.as_ref().map(|p| p.no_history).unwrap_or(false),
             };
 
-            // Store the secret (prompted, or migrated from the URL) keyed on the
-            // stable user@host:port/db identity — never the profile name — so a
-            // re-typed URL resolves the same entry and two databases can't collide.
             let pw = if set_password {
                 Some(rpassword::prompt_password(format!("Password for `{name}`: "))?)
             } else {

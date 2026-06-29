@@ -1,25 +1,16 @@
-//! Small cross-cutting helpers: secure temp files, PATH lookup, editor
-//! resolution, DSN redaction, terminal size.
-
 use anyhow::{bail, Result};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-/// What kind of editor we resolved, so we know which flags are safe to pass.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EditorKind {
-    /// Neovim: gets `-i NONE` + filetype + our buffer-local keymap inject.
     Nvim,
-    /// Vim/vi family: gets filetype but no neovim-only lua inject.
     Vimlike,
-    /// Anything else (nano, code, …): just open the file.
     Other,
 }
 
-/// Resolve the editor command, mirroring psql/kubectl precedence:
-/// NSQL_EDITOR > VISUAL > EDITOR > nvim > vi. Returns the program and its kind.
 pub fn resolve_editor() -> Result<(String, EditorKind)> {
     let mut candidates: Vec<String> = Vec::new();
     for var in ["NSQL_EDITOR", "VISUAL", "EDITOR"] {
@@ -33,7 +24,6 @@ pub fn resolve_editor() -> Result<(String, EditorKind)> {
     candidates.push("vi".to_string());
 
     for cand in candidates {
-        // EDITOR may include args ("code -w"); take the first token as the program.
         let program = cand.split_whitespace().next().unwrap_or(&cand).to_string();
         if find_on_path(&program).is_some() {
             return Ok((program.clone(), editor_kind(&program)));
@@ -59,7 +49,6 @@ fn editor_kind(program: &str) -> EditorKind {
     }
 }
 
-/// Find an executable on $PATH (or honour an explicit path containing '/').
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -82,9 +71,6 @@ fn is_executable(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Create a fresh 0600 temp file with an unpredictable name (O_EXCL guards
-/// against a symlink/TOCTOU pre-creation attack on multi-user boxes). Returns
-/// the path; the caller owns it.
 pub fn secure_tempfile(prefix: &str, ext: &str) -> Result<PathBuf> {
     let dir = std::env::temp_dir();
     for _ in 0..16 {
@@ -111,8 +97,6 @@ fn rand_token() -> String {
             return buf.iter().map(|b| format!("{b:02x}")).collect();
         }
     }
-    // Fallback: pid + monotonic-ish nanos (not security-critical because
-    // create_new still guarantees we created the file).
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
@@ -120,16 +104,13 @@ fn rand_token() -> String {
     format!("{}{nanos:08x}", std::process::id())
 }
 
-/// Decompose `scheme://user:pass@host:port/path` into (head, user, password,
-/// host_and_path). Uses the LAST `@` in the *authority* (before the path) so a
-/// password that itself contains `@` is handled correctly.
 fn split_url(url: &str) -> Option<(&str, &str, Option<&str>, String)> {
     let i = url.find("://")?;
     let (head, rest) = url.split_at(i + 3);
     let auth_end = rest.find('/').unwrap_or(rest.len());
     let (authority, path) = rest.split_at(auth_end);
     let at = authority.rfind('@')?;
-    let (userinfo, hostat) = authority.split_at(at); // hostat = "@host:port"
+    let (userinfo, hostat) = authority.split_at(at);
     let (user, password) = match userinfo.find(':') {
         Some(c) => (&userinfo[..c], Some(&userinfo[c + 1..])),
         None => (userinfo, None),
@@ -137,8 +118,6 @@ fn split_url(url: &str) -> Option<(&str, &str, Option<&str>, String)> {
     Some((head, user, password, format!("{hostat}{path}")))
 }
 
-/// Mask the password in a connection URL so it never lands in scrollback, logs,
-/// or error messages. `scheme://user:secret@host` -> `scheme://user:***@host`.
 pub fn redact_url(url: &str) -> String {
     match split_url(url) {
         Some((head, user, Some(_), hostpath)) => format!("{head}{user}:***{hostpath}"),
@@ -146,10 +125,6 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
-/// Remove the password from a connection URL for *storage* (keeps the username).
-/// `scheme://user:secret@host` -> `scheme://user@host`. NOTE: distinct from
-/// `redact_url`, which substitutes `***` for *display* — never use that for
-/// storage or it would write a literal `***` password.
 pub fn strip_url_password(url: &str) -> String {
     match split_url(url) {
         Some((head, user, Some(_), hostpath)) => format!("{head}{user}{hostpath}"),
@@ -157,8 +132,6 @@ pub fn strip_url_password(url: &str) -> String {
     }
 }
 
-/// The password embedded in a connection URL, if any (used to migrate it into
-/// the keyring at `connect` time so it never persists in config.toml).
 pub fn url_password(url: &str) -> Option<String> {
     match split_url(url) {
         Some((_, _, Some(pw), _)) if !pw.is_empty() => Some(pw.to_string()),
@@ -166,9 +139,6 @@ pub fn url_password(url: &str) -> Option<String> {
     }
 }
 
-/// Atomically write a file readable only by the owner (0600), closing the
-/// write-then-chmod TOCTOU window: write to an O_EXCL 0600 temp in the same
-/// directory, then rename over the target.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -195,13 +165,11 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     bail!("could not create a temp file next to {}", path.display())
 }
 
-/// Best-effort: tighten a directory to owner-only (0700).
 pub fn chmod_private_dir(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
 }
 
-/// (columns, rows) of the terminal, with a sane fallback when not a tty.
 pub fn term_size() -> (u16, u16) {
     match terminal_size::terminal_size() {
         Some((terminal_size::Width(w), terminal_size::Height(h))) => (w.max(20), h.max(4)),
@@ -226,7 +194,6 @@ mod tests {
             redact_url("postgres://joe:hunter2@db.local:5432/app"),
             "postgres://joe:***@db.local:5432/app"
         );
-        // no password -> unchanged
         assert_eq!(redact_url("sqlite:///x/y.db"), "sqlite:///x/y.db");
         assert_eq!(
             redact_url("postgres://joe@host/db"),
@@ -236,8 +203,6 @@ mod tests {
 
     #[test]
     fn password_with_at_sign_does_not_leak() {
-        // A password containing '@' must be fully masked/stripped (uses the LAST
-        // '@' in the authority, not the first).
         let u = "postgres://joe:p@ss@db.host:5432/app";
         assert_eq!(redact_url(u), "postgres://joe:***@db.host:5432/app");
         assert_eq!(strip_url_password(u), "postgres://joe@db.host:5432/app");

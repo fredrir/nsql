@@ -1,8 +1,3 @@
-//! Recent connections — machine memory so bare `nsql` resumes the last database
-//! you used. Stored in `state_dir/recents.toml` (0600), **url without password**
-//! (credentials resolve at connect time). LRU, capped. `no_history` profiles are
-//! never recorded.
-
 use crate::config::{Config, Paths, Profile};
 use crate::util;
 use serde::{Deserialize, Serialize};
@@ -18,20 +13,14 @@ pub struct Recents {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Recent {
-    /// Display label (the db name or saved-profile name).
     pub label: String,
-    /// Connection URL — NEVER contains a password.
     pub url: String,
-    /// Unix seconds of last use (most-recent first).
     pub last_used: i64,
-    /// Set when this came from a saved profile, so resume can recover its flags.
     #[serde(default)]
     pub profile: Option<String>,
 }
 
 impl Recent {
-    /// Turn a recent into a usable Profile, preferring a matching saved profile
-    /// (so prod/readonly flags survive a resume).
     pub fn to_profile(&self, cfg: &Config) -> Profile {
         if let Some(name) = &self.profile {
             if let Some(p) = cfg.profiles.iter().find(|p| &p.name == name) {
@@ -57,13 +46,10 @@ pub fn load(paths: &Paths) -> Recents {
 
 fn save(paths: &Paths, r: &Recents) {
     if let Ok(text) = toml::to_string_pretty(r) {
-        // 0600, atomic — never leak a connection inventory world-readable.
         let _ = util::write_private(&paths.recents_file, text.as_bytes());
     }
 }
 
-/// Record a successful connection (most-recent first, deduped by url, capped).
-/// Stores the url WITHOUT its password. Honors `no_history`.
 pub fn record(paths: &Paths, profile: &Profile, saved: bool) {
     if profile.no_history {
         return;
@@ -92,7 +78,6 @@ pub fn most_recent(paths: &Paths) -> Option<Recent> {
     load(paths).entries.into_iter().next()
 }
 
-/// Resolve a positional target to a recent: a 1-based index, or a label match.
 pub fn resolve(paths: &Paths, target: &str) -> Option<Recent> {
     let r = load(paths);
     if let Ok(idx) = target.parse::<usize>() {
@@ -139,14 +124,12 @@ mod tests {
         record(&p, &prof("app", "postgres://u:secret@h:5432/app"), false);
         record(&p, &prof("local", "sqlite:///tmp/x.db"), false);
 
-        // Most-recent first; password stripped on disk.
         let raw = std::fs::read_to_string(&p.recents_file).unwrap();
         assert!(!raw.contains("secret"), "password leaked into recents: {raw}");
         assert_eq!(most_recent(&p).unwrap().label, "local");
         assert_eq!(resolve(&p, "1").unwrap().label, "local");
         assert_eq!(resolve(&p, "app").unwrap().url, "postgres://u@h:5432/app");
 
-        // Re-recording dedupes by url and bumps to front.
         record(&p, &prof("app", "postgres://u:other@h:5432/app"), false);
         assert_eq!(most_recent(&p).unwrap().label, "app");
         assert_eq!(load(&p).entries.len(), 2);

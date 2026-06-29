@@ -1,10 +1,3 @@
-//! Paths (XDG with proper fallbacks) and the profiles config.
-//!
-//! Note: $XDG_CONFIG_HOME / $XDG_STATE_HOME are frequently unset (verified on
-//! this machine), so we go through the `directories` crate which applies the
-//! spec fallbacks (~/.config, ~/.local/share, …) instead of reading env vars
-//! directly.
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -32,8 +25,6 @@ impl Paths {
         std::fs::create_dir_all(&data_dir).ok();
         std::fs::create_dir_all(&state_dir).ok();
         std::fs::create_dir_all(&favorites_dir).ok();
-        // Keep all of nsql's dirs owner-only: they hold connection inventories,
-        // query history (may contain literal secrets), scratch, and recents.
         for d in [&config_dir, &data_dir, &state_dir, &favorites_dir] {
             crate::util::chmod_private_dir(d);
         }
@@ -57,8 +48,6 @@ impl Paths {
 #[derive(Deserialize, Serialize, Default, Debug)]
 pub struct Config {
     pub default: Option<String>,
-    /// Initial height (rows) of the editor and results panes in the inline session.
-    /// They share this cap; `None` = the default (12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_height: Option<u16>,
     #[serde(default, rename = "profile")]
@@ -66,7 +55,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// Configured pane height, clamped to a sane range. Default 12.
     #[cfg_attr(not(feature = "embed-editor"), allow(dead_code))]
     pub fn pane_height(&self) -> u16 {
         self.pane_height.unwrap_or(12).clamp(5, 24)
@@ -81,7 +69,6 @@ pub struct Profile {
     pub prod: bool,
     #[serde(default)]
     pub readonly: bool,
-    /// Skip recording this profile's queries to history (for sensitive DBs).
     #[serde(default)]
     pub no_history: bool,
 }
@@ -91,7 +78,6 @@ impl Profile {
         self.url.split(':').next().unwrap_or("")
     }
 
-    /// For sqlite URLs, the filesystem path (or ":memory:").
     pub fn sqlite_target(&self) -> String {
         let rest = self
             .url
@@ -116,8 +102,6 @@ impl Config {
             return Ok(cfg);
         }
 
-        // First run: bootstrap a working local sqlite profile so `nsql -e ...`
-        // works out of the box.
         let cfg = Config {
             default: Some("local".to_string()),
             pane_height: None,

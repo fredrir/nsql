@@ -1,6 +1,3 @@
-//! Executed-query history in a single 0600 sqlite file. Powers crash recovery
-//! and (Phase 2) Ctrl-R search. Profiles flagged `no_history` are never logged.
-
 use crate::config::Paths;
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};

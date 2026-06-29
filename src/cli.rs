@@ -1,7 +1,3 @@
-//! Command-line surface. nsql is a *verb*, not an app you enter: the default
-//! invocation opens your editor, runs the result, prints to normal scrollback,
-//! and exits. Everything else is a flag or a small subcommand.
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]

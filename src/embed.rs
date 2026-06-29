@@ -1,27 +1,3 @@
-//! Zero-flash persistent inline session (behind the `embed-editor` feature).
-//!
-//! We spawn `nvim --embed` — a headless editing engine that draws NOTHING to the
-//! terminal — drive it over msgpack-RPC, attach a UI, and render its
-//! `ext_linegrid` redraw stream (with colors) into a ratatui **inline** region.
-//! nvim itself owns a horizontal split: the editor on top, and a scratch
-//! **results buffer** below (created via RPC). We render nvim's whole global grid
-//! — both windows, both statuslines — so the results pane is a FIRST-CLASS nvim
-//! buffer: navigable with native motions, type-coloured per cell via extmarks, and
-//! yankable as clean values (no box-drawing chars). The user's scrollback ABOVE is
-//! never touched. nvim never emits smcup, so there is no alt-screen flash, ever.
-//!
-//! Queries run IN-SESSION: a buffer-local keymap (`,r`) or `:w` fires an
-//! `rpcnotify('nsql_run', {sql})` (the channel is handed to inject.lua as
-//! `g:nsql_chan` after attach); the handler runs it via `db::run` and writes the
-//! result into the results buffer (`write_results` → `format_for_buffer`). `,o`
-//! jumps into that buffer; a yank there mirrors to the clipboard via OSC 52 (so
-//! does `,y` for the whole result). `,,`/`,q` quit (persisting the scratch). Errors
-//! render in the buffer and never end the session.
-//!
-//! The async machinery (tokio + nvim-rs + ratatui) is contained entirely within
-//! this module and a current-thread runtime scoped inside `compose()`; the rest
-//! of nsql stays sync.
-
 use crate::config::{Paths, Profile};
 use crate::{db, editor, history, render, util};
 use anyhow::{anyhow, Context, Result};
@@ -47,34 +23,25 @@ use tokio::sync::mpsc;
 
 type NvimWriter = Compat<ChildStdin>;
 
-/// Open the persistent inline session (zero-flash). Queries run IN-SESSION (on
-/// `,r`/`:w`); results render in a bottom pane WITHOUT disturbing the scrollback
-/// above. Returns when the user quits (`,,`/`,q`); the scratch is persisted.
 pub fn compose(paths: &Paths, profile: &Profile, portable: bool) -> Result<()> {
     editor::write_inject(paths)?;
     let scratch = paths.scratch_for(&profile.name);
     let prior = std::fs::read_to_string(&scratch).unwrap_or_default();
-    // Clean buffer: just the prior scratch (strip_header scrubs any legacy header).
     let initial = editor::strip_header(&prior);
 
     let tmp = util::secure_tempfile("nsql", "sql")?;
     std::fs::write(&tmp, &initial).with_context(|| format!("writing {}", tmp.display()))?;
 
-    // Scoped current-thread runtime — no async escapes this function.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("starting embed runtime")?;
 
     let res = rt.block_on(run_session(paths, &tmp, profile, portable));
-    // Don't block on a query still running on the blocking pool if the user quit
-    // mid-query — detach it so quitting is instant.
     rt.shutdown_background();
-    // Always restore the terminal, whatever happened.
     let _ = disable_raw_mode();
     res?;
 
-    // Persist the buffer for next-time resume (queries already ran in-session).
     let edited = std::fs::read_to_string(&tmp).unwrap_or_default();
     std::fs::remove_file(&tmp).ok();
     let body = editor::strip_header(&edited);
@@ -84,18 +51,12 @@ pub fn compose(paths: &Paths, profile: &Profile, portable: bool) -> Result<()> {
     Ok(())
 }
 
-/// A request from inside nvim (via rpcnotify) to act on the session.
 enum RunMsg {
     Run { sql: String, force: bool, all: bool },
-    /// Copy the last result in a structured format (`json` / `csv`) to the
-    /// clipboard — the custom-key surface for *export* features.
     Export(String),
-    /// Text yanked inside the results buffer — mirror it to the system clipboard
-    /// (OSC 52) so a native visual-select+`y` copies clean values everywhere.
     Yank(String),
 }
 
-/// Drive the embedded nvim session: editor on top, results pane on the bottom.
 async fn run_session(
     paths: &Paths,
     tmp: &std::path::Path,
@@ -104,10 +65,6 @@ async fn run_session(
 ) -> Result<()> {
     let (cols, rows) = util::term_size();
     let width = cols.max(20);
-    // Editor on top, results split below (created lazily on the first result). The
-    // editor and results panes SHARE one configurable height cap; +2 for the two
-    // statuslines (the moving "main header" / sticky column header). nvim owns the
-    // bars; nsql renders its whole grid. The scrollback ABOVE is never touched.
     let cfg_pane = crate::config::Config::load_or_init(paths)
         .map(|c| c.pane_height())
         .unwrap_or(12);
@@ -122,14 +79,12 @@ async fn run_session(
         .env("NSQL_URL", util::redact_url(&profile.url))
         .env("NSQL_PROD", if profile.prod { "1" } else { "0" })
         .env("NSQL_SAFE", if profile.readonly { "1" } else { "0" })
-        .env_remove("PGPASSWORD") // don't leak a secret into the editor's env
+        .env_remove("PGPASSWORD")
         .arg("--embed")
         .arg("-n")
         .arg("-i")
         .arg("NONE");
     if portable {
-        // nsql's own minimal config instead of the user's — identical behaviour on a
-        // bare server. inject.lua (below) still supplies every nsql feature.
         cmd.arg("-u").arg(editor::portable_init_path(paths));
     }
     cmd.arg(tmp)
@@ -152,26 +107,16 @@ async fn run_session(
     let mut opts = UiAttachOptions::new();
     opts.set_linegrid_external(true);
     opts.set_rgb(true);
-    // Attach at the FULL inline height: nvim owns BOTH windows (editor + results
-    // split) and draws them — incl. statuslines — into one global grid we render.
     nvim.ui_attach(width as i64, view_h as i64, &opts)
         .await
         .map_err(|e| anyhow!("nvim ui_attach failed: {e}"))?;
 
-    // Tell inject.lua which channel to rpcnotify on. nvim_get_api_info() called
-    // from a startup luafile returns the internal channel, so we resolve it here
-    // (this RPC call resolves to our channel) and hand it over as g:nsql_chan.
     if let Ok(info) = nvim.get_api_info().await {
         if let Some(ch) = info.first().and_then(|v| v.as_i64()) {
             let _ = nvim.set_var("nsql_chan", Value::from(ch)).await;
         }
     }
 
-    // Build the results window: a scratch buffer in a split below the editor, so
-    // the result is a first-class nvim buffer — navigable with native motions and
-    // yankable as CLEAN values (no box-drawing chars). nsql writes into it via RPC
-    // and colours each cell by type with extmarks. Returns the buffer handle (or
-    // -1 on failure; then result writes are simply no-ops — the editor still works).
     let rbuf: i64 = nvim
         .exec_lua(SETUP_RESULTS_LUA, vec![Value::from(results_rows as i64)])
         .await
@@ -181,8 +126,6 @@ async fn run_session(
 
     enable_raw_mode().context("enabling raw mode")?;
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
-    // Restores the terminal even on a panic unwind, so a crash never leaves the
-    // shell in raw mode with a corrupted prompt.
     let _term_guard = TermGuard;
     let shutdown = Arc::new(AtomicBool::new(false));
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
@@ -218,15 +161,9 @@ async fn run_session(
 
     let mut grid = Grid::new(width as usize, view_h as usize);
     let mut last_shape = Shape::Block;
-    // Last result pre-rendered for the export keys (,j / ,c).
     let mut result_json: Option<String> = None;
     let mut result_csv: Option<String> = None;
-    // The last successful result, rendered with its query — printed into the
-    // user's scrollback on exit so the answer stays in context with their work.
     let mut last_persist: Option<String> = None;
-    // A query runs on the blocking pool and reports back here, so the event loop
-    // keeps pumping redraws/keys (the editor never freezes) and the sync postgres
-    // crate's own runtime can't nest in ours.
     let (qdone_tx, mut qdone_rx) =
         mpsc::unbounded_channel::<(Result<db::QueryResult>, std::time::Instant, String)>();
     let mut in_flight: Option<std::time::Instant> = None;
@@ -234,9 +171,6 @@ async fn run_session(
     let mut spin_i = 0usize;
     const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-    // Introspect the DB schema in the background and hand it to the omnifunc, so
-    // <C-x><C-o> completes live table/column names. Never blocks the editor; a
-    // failure just means no completion.
     let (schema_tx, mut schema_rx) = mpsc::unbounded_channel::<Value>();
     {
         let p = profile.clone();
@@ -277,7 +211,6 @@ async fn run_session(
                         } else if db::strip_sql_comments(&sql).trim().is_empty() {
                             write_results(&nvim, rbuf, "", &["  (nothing to run)".to_string()], &[]).await;
                         } else {
-                            // guard is fast (no I/O); only the query itself is offloaded.
                             match db::guard(profile, &sql, force, false) {
                                 Err(e) => {
                                     let msg = format!("  error: {}", first_line(&format!("{e:#}")));
@@ -298,19 +231,15 @@ async fn run_session(
                             }
                         }
                     }
-                    // ,j / ,c from the editor: copy the last result as JSON / CSV
-                    // WITHOUT disturbing the buffer view (the result stays on screen).
                     RunMsg::Export(fmt) => {
                         let data = if fmt == "csv" { result_csv.as_deref() } else { result_json.as_deref() };
                         if let Some(d) = data {
                             osc52_copy(d);
                         }
                     }
-                    // Native visual-select + y inside the results buffer → clipboard.
                     RunMsg::Yank(text) => osc52_copy(&text),
                 }
             }
-            // A query finished (on the blocking pool) — render it into the buffer.
             Some((res, _started, sql)) = qdone_rx.recv() => {
                 in_flight = None;
                 let (header, lines, marks) = format_for_buffer(&res);
@@ -327,10 +256,6 @@ async fn run_session(
                     let _ = history::record(paths, &profile.name, &sql);
                 }
             }
-            // Advance the live spinner. Writing it to the results buffer makes nvim
-            // redraw, which our redraw arm renders. When idle (the common case while
-            // waiting) this fires every 120ms; transient starvation while actively
-            // typing is harmless (the user isn't watching the spinner then).
             _ = spinner.tick() => {
                 if let Some(started) = in_flight {
                     let f = SPIN[spin_i % SPIN.len()];
@@ -361,7 +286,6 @@ async fn run_session(
                     _ => {}
                 }
             }
-            // The background schema arrived — hand it to the omnifunc.
             Some(schema) = schema_rx.recv() => {
                 let _ = nvim.exec_lua(SET_SCHEMA_LUA, vec![schema]).await;
             }
@@ -373,13 +297,7 @@ async fn run_session(
     }
 
     shutdown.store(true, Ordering::Relaxed);
-    // Persist the last result into the real scrollback so the answer stays in
-    // context with the user's main work after nsql exits (insert_before pushes it
-    // ABOVE the inline region, which we then clear).
     if let Some(block) = &last_persist {
-        // `render_persist` already produced a compact block (query + first rows +
-        // one summary line). A generous safety cap guards against a pathological
-        // multi-line query echo, but normal results are ~13 lines.
         let mut src: Vec<String> = block.lines().map(|l| l.to_string()).collect();
         const MAX_PERSIST: usize = 30;
         src.truncate(MAX_PERSIST);
@@ -390,14 +308,10 @@ async fn run_session(
             Paragraph::new(Text::from(lines)).render(buf.area, buf);
         });
     }
-    let _ = terminal.clear(); // wipe nsql's region; _term_guard restores the terminal
+    let _ = terminal.clear();
     Ok(())
 }
 
-/// Side outputs for a finished query: the result pre-rendered as JSON and CSV (for
-/// the `,j` / `,c` export keys) and the bordered block to leave in scrollback on
-/// exit. The on-screen result itself is rendered separately by [`format_for_buffer`]
-/// into the nvim results buffer. Pure — unit-testable without nvim or a tty.
 struct Outcome {
     json: Option<String>,
     csv: Option<String>,
@@ -420,15 +334,11 @@ fn render_outcome(res: &Result<db::QueryResult>, sql: &str) -> Outcome {
         Err(_) => Outcome {
             json: None,
             csv: None,
-            persist: None, // keep the last successful result for the exit scrollback
+            persist: None,
         },
     }
 }
 
-/// A COMPACT, accurate scrollback record for exit: the query echoed, the first few
-/// rows borderless-aligned, and ONE concise summary line. Never renders the whole
-/// result (a bordered 1000-row table is ~2000 lines) and never mislabels lines as
-/// rows — so prior work stays visible above it.
 fn render_persist(result: &db::QueryResult, sql: &str) -> String {
     use std::fmt::Write;
     const SHOW: usize = 10;
@@ -481,7 +391,6 @@ fn render_persist(result: &db::QueryResult, sql: &str) -> String {
             for r in &disp {
                 let _ = writeln!(out, "{}", row_line(&|i| r[i].clone()));
             }
-            // One concise, honest summary line.
             if truncated.is_some() {
                 let _ = writeln!(out, "-- first {total} rows (capped) · ,a or `nsql -e` for all");
             } else if total > show.len() {
@@ -494,12 +403,6 @@ fn render_persist(result: &db::QueryResult, sql: &str) -> String {
     out
 }
 
-// ---- results buffer: type-coloured, clean-yank table ---------------------
-
-/// A type-coloured span in the results buffer: a byte range `[col, end)` on a
-/// 0-indexed `line`, painted with the nvim highlight group `hl` (so it matches the
-/// user's colorscheme — `Number`, `String`, `Constant` for dates, `Comment` for
-/// NULL, `Title` for headers).
 struct CellMark {
     line: usize,
     col: usize,
@@ -507,15 +410,6 @@ struct CellMark {
     hl: &'static str,
 }
 
-/// Render a finished query into the results buffer: borderless, space-aligned
-/// columns (so a native yank copies VALUES, not box-drawing chars) plus per-cell
-/// type highlight marks classified by the value itself (Postgres hands us
-/// everything as text, so colour comes from the content, not just the SQL type).
-///
-/// Returns `(header, lines, marks)`: the column-header row is returned SEPARATELY
-/// (it becomes the editor's statusline — a sticky header pinned above the scrolling
-/// data, aligned to the same columns), so the buffer holds data rows only. `header`
-/// is empty for non-tabular outcomes (error / affected / 0 rows).
 fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec<CellMark>) {
     let result = match res {
         Ok(r) => r,
@@ -535,10 +429,7 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
         return (String::new(), vec!["  (0 rows)".to_string()], Vec::new());
     }
 
-    const MAXW: usize = 60; // cap a single column so one huge cell can't wreck layout
-    // Bound the on-screen rows (one extmark per cell): a `,a`/--all query on a
-    // huge table mustn't create hundreds of thousands of marks. The full result
-    // is still exportable (`,j`/`,c`) and re-runnable.
+    const MAXW: usize = 60;
     const MAX_BUF_ROWS: usize = 2000;
     let total = rows.len();
     let rows: &[Vec<db::Cell>] = if total > MAX_BUF_ROWS { &rows[..MAX_BUF_ROWS] } else { rows };
@@ -558,8 +449,6 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
 
     let sep = "  ";
 
-    // Header row → the editor statusline (sticky), aligned to the same widths so it
-    // lines up with the data below it.
     let mut header = String::new();
     for (i, c) in columns.iter().enumerate() {
         let shown = truncate_disp(c, widths[i]);
@@ -573,7 +462,6 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
     let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
     let mut marks: Vec<CellMark> = Vec::new();
 
-    // Data rows (buffer line 0 = first data row; the header lives in the statusline).
     for (ri, row) in rows.iter().enumerate() {
         let mut line = String::new();
         for i in 0..ncol {
@@ -594,9 +482,6 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
         lines.push(line);
     }
 
-    // Footer: the LAST row of the table (not a statusline). `N+ rows` when there are
-    // more than shown (capped) — coloured distinctly (WarningMsg) so the `+` count
-    // never reads as a data value; plain `N rows` (dim) when it's exact.
     let shown = rows.len();
     let more = truncated.is_some() || shown < total;
     let footer = if more {
@@ -617,8 +502,6 @@ fn push_pad(s: &mut String, n: usize) {
     }
 }
 
-/// One-line display string for a cell in the results buffer (NULL gets a distinct
-/// glyph so it never reads as an empty string; control chars are escaped).
 fn buf_cell(c: Option<&db::Cell>) -> String {
     match c {
         None | Some(db::Cell::Null) => "∅".to_string(),
@@ -650,8 +533,6 @@ fn truncate_disp(s: &str, w: usize) -> String {
     }
 }
 
-/// Pick the nvim highlight group for a cell from its TYPE and VALUE, so ints/dates
-/// "feel like" ints/dates regardless of backend (Postgres values arrive as text).
 fn classify(shown: &str, c: Option<&db::Cell>) -> &'static str {
     match c {
         None | Some(db::Cell::Null) => "Comment",
@@ -678,8 +559,6 @@ fn classify_text(s: &str) -> &'static str {
     "String"
 }
 
-/// A leading ISO date (`YYYY-MM-DD`, optionally followed by a time) — enough to
-/// catch dates/timestamps from either backend without a regex dependency.
 fn looks_like_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 10
@@ -690,9 +569,6 @@ fn looks_like_date(s: &str) -> bool {
         && b[8..10].iter().all(u8::is_ascii_digit)
 }
 
-/// Write `lines` into the results buffer and repaint type colours via extmarks.
-/// Driven entirely in Lua (one RPC) so we don't juggle buffer-handle types; a
-/// no-op if `rbuf` is invalid (setup failed), so the editor still works.
 async fn write_results(
     nvim: &Neovim<NvimWriter>,
     rbuf: i64,
@@ -725,10 +601,6 @@ async fn write_results(
         .await;
 }
 
-/// Lua: create the scratch results BUFFER (not the window — that's lazy, on the
-/// first result, so the bottom pane + its bar stay hidden until there's something
-/// to show) and wire native toggle-back-to-editor + clean-yank-to-clipboard.
-/// Defines `_G.nsql_ensure_rwin()` to open the split on demand. `...` = (results_rows).
 const SETUP_RESULTS_LUA: &str = r#"
 local results_rows = ...
 local ok, rbuf = pcall(vim.api.nvim_create_buf, false, true)
@@ -787,12 +659,6 @@ end
 return rbuf
 "#;
 
-/// Lua: write the result into the buffer (footer row included), repaint type
-/// colours, and (lazily) show the results split. Bars MOVE: the editor statusline
-/// becomes the sticky COLUMN HEADER directly above the rows, and the MAIN HEADER
-/// (db badge · SAFE · ,h help) moves to the bottom statusline. On a non-table
-/// outcome the editor statusline reverts to the main header. `...` = (rbuf, lines[],
-/// marks[], header).
 const WRITE_RESULTS_LUA: &str = r#"
 local rbuf, lines, marks, header = ...
 if not vim.api.nvim_buf_is_valid(rbuf) then return end
@@ -819,8 +685,6 @@ if rw and vim.api.nvim_win_is_valid(rw) then
 end
 "#;
 
-// ---- schema-aware completion -------------------------------------------------
-
 const SQLITE_SCHEMA_Q: &str = "SELECT m.name, p.name FROM sqlite_master m \
      JOIN pragma_table_info(m.name) p \
      WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' \
@@ -829,11 +693,6 @@ const PG_SCHEMA_Q: &str = "SELECT table_name, column_name FROM information_schem
      WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
      ORDER BY table_name, ordinal_position";
 
-/// Lua: stash the live schema as a global the completion code reads, AND paint
-/// known table / column names in the editor. Prefers TREESITTER (precise: only
-/// real identifier nodes colour, strings/comments are skipped, kept fresh on edits)
-/// and falls back to whole-word `matchadd` when there's no `sql` parser. `...` = the
-/// schema map { tables=[…], columns=[…], by_table={…} }.
 const SET_SCHEMA_LUA: &str = r#"
 local s = ...
 _G.nsql_schema = s
@@ -923,9 +782,6 @@ pcall(function()
 end)
 "#;
 
-/// Introspect the connected DB's tables + columns into a Lua-ready map for the
-/// omnifunc. Runs on the blocking pool (it's a live query) and is best-effort: any
-/// failure just means no completion. `None` for engines/queries we can't introspect.
 fn introspect_schema(profile: &Profile) -> Option<Value> {
     let q = match profile.scheme() {
         "sqlite" => SQLITE_SCHEMA_Q,
@@ -936,7 +792,6 @@ fn introspect_schema(profile: &Profile) -> Option<Value> {
         db::QueryResult::Rows { rows, .. } => rows,
         _ => return None,
     };
-    // The query is ordered by table, so consecutive rows of the same table group.
     let mut tables: Vec<String> = Vec::new();
     let mut by_table: Vec<(String, Vec<String>)> = Vec::new();
     let mut all_cols: Vec<String> = Vec::new();
@@ -984,9 +839,6 @@ fn cell_str(c: Option<&db::Cell>) -> String {
     }
 }
 
-/// RAII restore of the terminal (raw mode, bracketed paste, cursor shape) — runs
-/// on a normal return AND during a panic unwind, so a crash never leaves the
-/// shell in raw mode with a corrupted prompt.
 struct TermGuard;
 impl Drop for TermGuard {
     fn drop(&mut self) {
@@ -999,7 +851,6 @@ impl Drop for TermGuard {
     }
 }
 
-/// First meaningful line of a query, truncated — for the "running: …" label.
 fn first_line(s: &str) -> String {
     let line = s
         .lines()
@@ -1014,7 +865,6 @@ fn first_line(s: &str) -> String {
     }
 }
 
-/// Copy text to the system clipboard via OSC 52 (works over SSH; no xclip/pbcopy).
 fn osc52_copy(text: &str) {
     use std::io::Write;
     let seq = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
@@ -1049,8 +899,6 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// Translate a crossterm key into nvim input notation. M1 covers the common keys
-/// needed to type SQL and trigger `,,` / `:wq` / `,q`.
 fn translate_key(k: KeyEvent) -> Option<String> {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
@@ -1107,9 +955,6 @@ fn translate_key(k: KeyEvent) -> Option<String> {
     }
 }
 
-/// Render the inline region: nvim's whole grid — the editor, the (lazy) results
-/// split, and their statuslines (the moving "main header" / sticky column header).
-/// nvim owns the bars; the scrollback above is never touched.
 fn draw_grid(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     grid: &Grid,
@@ -1128,7 +973,6 @@ fn draw_grid(
     });
 }
 
-/// Build one styled line, coalescing runs of cells that share a highlight.
 fn render_row(grid: &Grid, row: &[GCell], width: usize) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
@@ -1155,10 +999,6 @@ fn resolve_style(grid: &Grid, hl: u16) -> Style {
     if let Some(fg) = a.fg.or(grid.def_fg) {
         s = s.fg(rgb(fg));
     }
-    // Blend with the native terminal: leave the DEFAULT background transparent
-    // (the terminal's own bg shows through), and only paint a background for
-    // highlights that have their own distinct bg — a visual selection, search
-    // match, diagnostic, etc.
     if let Some(bg) = a.bg {
         if Some(bg) != grid.def_bg {
             s = s.bg(rgb(bg));
@@ -1183,8 +1023,6 @@ fn rgb(v: u32) -> Color {
     Color::Rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
 }
 
-// ---- grid model ----------------------------------------------------------
-
 #[derive(Clone, Copy)]
 struct GCell {
     ch: char,
@@ -1197,7 +1035,6 @@ impl Default for GCell {
     }
 }
 
-/// A resolved highlight (subset of nvim's `hl_attr_define` rgb attributes).
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Attr {
     fg: Option<u32>,
@@ -1208,7 +1045,6 @@ struct Attr {
     reverse: bool,
 }
 
-/// Terminal cursor shape, mirrored from nvim's current mode.
 #[derive(Clone, Copy, PartialEq)]
 enum Shape {
     Block,
@@ -1220,7 +1056,7 @@ struct Grid {
     w: usize,
     h: usize,
     cells: Vec<Vec<GCell>>,
-    cursor: (usize, usize), // (col, row)
+    cursor: (usize, usize),
     hl: HashMap<u16, Attr>,
     def_fg: Option<u32>,
     def_bg: Option<u32>,
@@ -1265,14 +1101,12 @@ fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
             let Some(p) = params.as_array() else { continue };
             match name {
                 "grid_resize" => {
-                    // [grid, width, height]
                     if let (Some(w), Some(h)) = (uget(p, 1), uget(p, 2)) {
                         grid.resize(w as usize, h as usize);
                     }
                 }
                 "grid_clear" => grid.clear(),
                 "grid_cursor_goto" => {
-                    // [grid, row, col]
                     if let (Some(r), Some(c)) = (uget(p, 1), uget(p, 2)) {
                         grid.cursor = (c as usize, r as usize);
                     }
@@ -1280,7 +1114,6 @@ fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
                 "grid_line" => apply_grid_line(grid, p),
                 "grid_scroll" => apply_grid_scroll(grid, p),
                 "default_colors_set" => {
-                    // [rgb_fg, rgb_bg, rgb_sp, cterm_fg, cterm_bg]
                     grid.def_fg = uget(p, 0).map(|v| v as u32);
                     grid.def_bg = uget(p, 1).map(|v| v as u32);
                 }
@@ -1290,7 +1123,6 @@ fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
                     }
                 }
                 "mode_change" => {
-                    // [mode (str), mode_idx]
                     if let Some(mode) = p.first().and_then(|v| v.as_str()) {
                         grid.shape = if mode.contains("insert") {
                             Shape::Bar
@@ -1308,7 +1140,6 @@ fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
 }
 
 fn parse_hl(p: &[Value]) -> Option<(u16, Attr)> {
-    // [id, rgb_attr (map), cterm_attr (map), info]
     let id = uget(p, 0)? as u16;
     let m = p.get(1)?;
     let b = |key: &str| map_get(m, key).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1335,7 +1166,6 @@ fn map_get<'a>(m: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
-    // [grid, row, col_start, cells, wrap]
     let (Some(row), Some(col_start)) = (uget(p, 1), uget(p, 2)) else {
         return;
     };
@@ -1346,7 +1176,6 @@ fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
     let Some(cells) = p.get(3).and_then(|v| v.as_array()) else {
         return;
     };
-    // hl id carries over to following cells that omit it (nvim ui spec).
     let mut last_hl: u16 = 0;
     for cell in cells {
         let Some(c) = cell.as_array() else { continue };
@@ -1354,8 +1183,6 @@ fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
         if let Some(h) = c.get(1).and_then(|v| v.as_u64()) {
             last_hl = h as u16;
         }
-        // Clamp the repeat to the cells that actually remain on the row — a
-        // malformed huge repeat must never spin the redraw loop.
         let remaining = grid.w.saturating_sub(col) as u64;
         let repeat = c.get(2).and_then(|v| v.as_u64()).unwrap_or(1).max(1).min(remaining);
         let ch = text.chars().next().unwrap_or(' ');
@@ -1367,15 +1194,12 @@ fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
 }
 
 fn apply_grid_scroll(grid: &mut Grid, p: &[Value]) {
-    // [grid, top, bot, left, right, rows, cols]
     let (Some(top), Some(bot), Some(left), Some(right)) =
         (uget(p, 1), uget(p, 2), uget(p, 3), uget(p, 4))
     else {
         return;
     };
     let rows = p.get(5).and_then(|v| v.as_i64()).unwrap_or(0);
-    // Clamp every bound to the grid so a malformed redraw can never index OOB
-    // (unsigned_abs avoids the i64::MIN negation overflow).
     let (top, bot, left, right) = (
         (top as usize).min(grid.h),
         (bot as usize).min(grid.h),
@@ -1419,8 +1243,6 @@ fn uget(p: &[Value], i: usize) -> Option<u64> {
     p.get(i).and_then(|v| v.as_u64())
 }
 
-// ---- RPC handler ---------------------------------------------------------
-
 #[derive(Clone)]
 struct RedrawHandler {
     tx: mpsc::UnboundedSender<Vec<Value>>,
@@ -1436,8 +1258,6 @@ impl Handler for RedrawHandler {
             "redraw" => {
                 let _ = self.tx.send(args);
             }
-            // rpcnotify(ch, 'nsql_run', { sql=…, force=bool, all=bool }) from inject.lua.
-            // The SQL is treated as untrusted text: the session re-derives guard/run.
             "nsql_run" => {
                 let p = args.first();
                 let sql = p
@@ -1455,12 +1275,10 @@ impl Handler for RedrawHandler {
                     .unwrap_or(false);
                 let _ = self.run_tx.send(RunMsg::Run { sql, force, all });
             }
-            // rpcnotify(ch, 'nsql_export', 'json'|'csv') from a ,j / ,c keymap.
             "nsql_export" => {
                 let fmt = args.first().and_then(|v| v.as_str()).unwrap_or("json").to_string();
                 let _ = self.run_tx.send(RunMsg::Export(fmt));
             }
-            // TextYankPost in the results buffer ships the yanked text here.
             "nsql_yank" => {
                 if let Some(text) = args.first().and_then(|v| v.as_str()) {
                     let _ = self.run_tx.send(RunMsg::Yank(text.to_string()));
@@ -1492,7 +1310,6 @@ mod tests {
     #[test]
     fn grid_line_writes_text() {
         let mut g = Grid::new(10, 3);
-        // grid_line params: [grid, row, col_start, [[ "H" ],[ "i" ]]]
         let p = vec![
             Value::from(1),
             Value::from(0u64),
@@ -1510,7 +1327,6 @@ mod tests {
     #[test]
     fn hl_attr_and_default_colors_parse() {
         let mut g = Grid::new(4, 1);
-        // default_colors_set [fg, bg, sp, ...]
         apply_redraw(
             &mut g,
             &[Value::Array(vec![
@@ -1520,7 +1336,6 @@ mod tests {
         );
         assert_eq!(g.def_fg, Some(0xeeeeee));
         assert_eq!(g.def_bg, Some(0x111111));
-        // hl_attr_define id=7 with a foreground + bold
         let attrmap = Value::Map(vec![
             (Value::from("foreground"), Value::from(0xff0000u64)),
             (Value::from("bold"), Value::from(true)),
@@ -1537,9 +1352,6 @@ mod tests {
         assert!(a.bold);
     }
 
-    /// End-to-end against REAL nvim (no tty needed): spawn `nvim --embed`, attach
-    /// a UI, type text, confirm it renders into our grid via the redraw stream,
-    /// then `:wq` and confirm the buffer is written back. This is the M1 contract.
     #[test]
     fn embed_drives_real_nvim_and_reads_back() {
         if crate::util::find_on_path("nvim").is_none() {
@@ -1627,8 +1439,6 @@ mod tests {
         assert!(matches!(g.shape, Shape::Block));
     }
 
-    /// Prove the M2 color pipeline against real nvim: force a concrete Normal
-    /// highlight and confirm we decode its rgb foreground from the redraw stream.
     #[test]
     fn embed_captures_highlight_colors() {
         if crate::util::find_on_path("nvim").is_none() {
@@ -1686,9 +1496,6 @@ mod tests {
 
     #[test]
     fn postgres_in_session_does_not_nested_runtime_panic() {
-        // Reproduce the embed runtime context: running a Postgres query from
-        // inside our tokio runtime must NOT panic with "runtime within a runtime".
-        // Against an unreachable port it should simply return a connection error.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1700,8 +1507,6 @@ mod tests {
             readonly: false,
             no_history: false,
         };
-        // The session runs queries via spawn_blocking; replicate that so the
-        // sync postgres crate's own runtime can't nest in ours.
         let r = rt.block_on(async move {
             tokio::task::spawn_blocking(move || db::run(&prof, "select 1", false))
                 .await
@@ -1712,7 +1517,6 @@ mod tests {
 
     #[test]
     fn render_outcome_exports_and_persist() {
-        // Deterministic: a real query against in-memory sqlite, no nvim/tty.
         let prof = crate::config::Profile {
             name: "t".into(),
             url: "sqlite::memory:".into(),
@@ -1751,33 +1555,26 @@ mod tests {
             readonly: false,
             no_history: false,
         };
-        // int, text, date-ish text, and NULL — one of each colour class.
         let sql = "select 42 as qty, 'widget' as name, '2026-06-10' as day, null as note";
         let res = db::run(&prof, sql, false);
         let (header, lines, marks) = format_for_buffer(&res);
 
-        // The header is returned SEPARATELY (it becomes the sticky statusline), and
-        // the buffer holds data rows only.
         assert!(header.contains("qty") && header.contains("name") && header.contains("note"));
 
-        // Borderless: a yank of any line must be free of box-drawing chars.
         for l in std::iter::once(&header).chain(lines.iter()) {
             assert!(
                 !l.contains('│') && !l.contains('─') && !l.contains('┌') && !l.contains('|'),
                 "results must be borderless for clean copy, got: {l:?}"
             );
         }
-        // First buffer line is the first DATA row (not the header).
         assert!(lines[0].contains("42") && lines[0].contains("widget"));
         assert!(lines.iter().any(|l| l.contains('∅')), "NULL needs a distinct glyph");
 
-        // Type classification by value.
         assert_eq!(classify("42", Some(&db::Cell::Int(42))), "Number");
         assert_eq!(classify("widget", Some(&db::Cell::Text("widget".into()))), "String");
         assert_eq!(classify("2026-06-10", Some(&db::Cell::Text("2026-06-10".into()))), "Constant");
         assert_eq!(classify("99", Some(&db::Cell::Text("99".into()))), "Number");
         assert_eq!(classify("", Some(&db::Cell::Null)), "Comment");
-        // The first data row's cells are marked (line 0 now = data, not header).
         assert!(marks.iter().any(|m| m.hl == "Number" && m.line == 0));
     }
 
@@ -1792,8 +1589,6 @@ mod tests {
 
     #[test]
     fn introspect_schema_lists_tables_and_columns() {
-        // A real on-disk sqlite DB (memory is per-connection, so it wouldn't
-        // survive the separate introspection connection).
         let path = std::env::temp_dir().join(format!("nsql-schema-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let prof = crate::config::Profile {
@@ -1828,8 +1623,6 @@ mod tests {
 
     #[test]
     fn default_background_is_transparent() {
-        // The editor blends with the terminal: the default bg is never painted,
-        // but a highlight with its own distinct bg (a selection) is.
         let mut g = Grid::new(2, 1);
         g.def_bg = Some(0x112233);
         assert!(resolve_style(&g, 0).bg.is_none(), "default bg must be transparent");
@@ -1863,9 +1656,6 @@ mod tests {
             .any(|r| r.iter().map(|c| c.ch).collect::<String>().contains(needle))
     }
 
-    /// Deterministically (nvim --clean, no user config to race) verify the
-    /// run-without-quit plumbing: inject.lua's native `:w` run and the `,j` export
-    /// keymap fire rpcnotify that the handler turns into RunMsg::{Run, Export}.
     #[test]
     fn run_keymap_round_trips_via_rpcnotify() {
         if crate::util::find_on_path("nvim").is_none() {
@@ -1903,14 +1693,12 @@ mod tests {
             o.set_linegrid_external(true);
             o.set_rgb(true);
             nvim.ui_attach(80, 6, &o).await.expect("attach");
-            // Hand the channel to inject.lua, exactly as run_session does.
             if let Ok(info) = nvim.get_api_info().await {
                 if let Some(ch) = info.first().and_then(|v| v.as_i64()) {
                     let _ = nvim.set_var("nsql_chan", Value::from(ch)).await;
                 }
             }
 
-            // Drain redraws while waiting for the next RunMsg (keeps the io task fed).
             async fn next(
                 run_rx: &mut mpsc::UnboundedReceiver<RunMsg>,
                 redraw_rx: &mut mpsc::UnboundedReceiver<Vec<Value>>,
@@ -1929,10 +1717,8 @@ mod tests {
                 .flatten()
             }
 
-            // Native :w (write = execute) → nsql_run.
             nvim.input(":w<CR>").await.ok();
             let run = next(&mut run_rx, &mut redraw_rx).await;
-            // ,j → export the last result as JSON.
             nvim.input(",j").await.ok();
             let export = next(&mut run_rx, &mut redraw_rx).await;
 
