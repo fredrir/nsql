@@ -1,0 +1,6 @@
+Archive: stable
+Component: main
+Origin: nsql
+Label: nsql
+Architecture: amd64
+Description: nsql apt repository — https://github.com/fredrir/nsql

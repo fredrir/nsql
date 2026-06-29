@@ -1,0 +1,39 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: nsql
+Label: nsql
+Suite: stable
+Codename: stable
+Date: Mon, 29 Jun 2026 21:07:57 UTC
+Architectures: amd64
+Components: main
+Description: nsql apt repository — https://github.com/fredrir/nsql
+MD5Sum:
+ 36bc8a2c10c45da9d096a7e9f176bcc2 829 main/binary-amd64/Packages
+ 2d07dc2a1dca82b940f9f91998885769 545 main/binary-amd64/Packages.gz
+ dae5e2d66ea8763f6f7f761b48d8a71b 146 main/binary-amd64/Release
+SHA1:
+ 5fe3f55db97997ab48f801afdb77fc999ba0ef99 829 main/binary-amd64/Packages
+ e6b40c7403d4e65894166a5dc14280bd6855f135 545 main/binary-amd64/Packages.gz
+ edcf5d9f78ebeff221cccbb0f16559ed028e64a3 146 main/binary-amd64/Release
+SHA256:
+ c7d6b3b9945fde24233f728b12e607c850ebd049bd5c8f5937092910a60ead9e 829 main/binary-amd64/Packages
+ 976498be70dd49501164b8b26830a3e6d1e93497de6a02889e877fafe87fa5e3 545 main/binary-amd64/Packages.gz
+ ee1d8d9bde5bcaac5c4c1971da139411bfa0b0b9981103d2784ded0e71d3af6c 146 main/binary-amd64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEE+hvdBLKequ201X5GesVE7jOfKuEFAmpC3q4ACgkQesVE7jOf
+KuGrfw//bCySxDC0JScqhFy9EpSuYF/KkBkYNxf9ZmjNC79f8w8TxyFByAchI6Fd
+8e6p871oecbTMcECvyPc9kPiT5r40IdBx1Exf4dNpqGmSq1AWqvZfni8IoQz+xxa
+MMbRA4KC65Zqd8dYhcpGNJoDTxgpDYKr9A0YJvESUzV5H+kUGvzqlKbttgDBEIxm
+pugnxOJ0xHvbrR91j5hOmogJBHuu2ea0qamtM4xOYa+2j/CszLix2Huz+TCAFIk0
+WSkHt64nnqTpOjaoj5/MwDOtHZWFn/Tc+i/nxyf+PnC01T0uDfJ1EFsS0gm2LyZt
+ZGCc0LKIGQL4Xyr6oYoXo6/Or3Poc9i7U0geZhr918oGeXBoaT36N4C0bmm45NWt
+9e2RgjEp2qocq6vjVu87m5nKx62lQo/HM1cmMzHLbGeYAff6qy6HUfJr783yqGH9
+10iTZNxwGHJqxjG7MP7V6LvkDkAIG1fFx0RiHv8gb7Ih49R8oUU5rPyMlx2DGqEm
++fcm0KZ/emH4ZyBqymvE11gtdRakqoCOxBrz1rvucxWXz+UL0u7QLm6laeVDEAUz
+YOqCogiBY4rdbjzTZ5b5Zqwo5K6u+fdwCCl8ke2DpeSFjD5UUWsiX8NKKy+H+gpV
+NFRdODwOKsnT1NZaWw6E6L2pcQCoSmHYleiOhH3Au2/uPi/cyNA=
+=v8b7
+-----END PGP SIGNATURE-----
