@@ -1,8 +1,9 @@
 name: Package managers
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -15,29 +16,26 @@ permissions:
 jobs:
   meta:
     name: Resolve version
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.v.outputs.tag }}
       version: ${{ steps.v.outputs.version }}
-      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - id: v
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.tag }}"
-            PRE="false"
           else
-            TAG="${{ github.event.release.tag_name }}"
-            PRE="${{ github.event.release.prerelease }}"
+            TAG="${{ github.event.workflow_run.head_branch }}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
 
   crates-io:
     name: Publish to crates.io
     needs: meta
-    if: ${{ github.event_name == 'release' && needs.meta.outputs.prerelease == 'false' }}
+    if: ${{ github.event_name == 'workflow_run' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -54,7 +52,6 @@ jobs:
   aur:
     name: Publish to the AUR (${{ matrix.pkg }})
     needs: meta
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.meta.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -81,7 +78,6 @@ jobs:
   debian-apt:
     name: Build .deb and publish signed apt repo
     needs: meta
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.meta.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -99,11 +95,6 @@ jobs:
         run: cargo install cargo-deb --locked
       - name: Build .deb
         run: cargo deb
-      - name: Import GPG signing key
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        run: |
-          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
       - name: Fetch existing apt repo state (gh-pages)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -115,10 +106,23 @@ jobs:
             echo "gh-pages does not exist yet; starting a fresh repo"
             mkdir -p public
           fi
-      - name: Update apt repository
+      - name: Sign and update apt repository
         env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
           APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
         run: |
+          set -euo pipefail
+          export GNUPGHOME="$HOME/.gnupg"
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\ndefault-cache-ttl 3600\nmax-cache-ttl 3600\n' > "$GNUPGHOME/gpg-agent.conf"
+          printf 'pinentry-mode loopback\n' > "$GNUPGHOME/gpg.conf"
+          gpgconf --kill gpg-agent || true
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          preset="$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase"
+          for grip in $(gpg --batch --with-colons --with-keygrip --list-secret-keys "$APT_GPG_KEY_ID" | awk -F: '/^grp:/{print $10}'); do
+            echo "$APT_GPG_PASSPHRASE" | "$preset" --preset "$grip"
+          done
           mkdir -p public/deb/conf
           sed "s/__APT_GPG_KEY_ID__/${APT_GPG_KEY_ID}/" \
             packaging/apt/conf/distributions > public/deb/conf/distributions
@@ -136,7 +140,6 @@ jobs:
   homebrew-linux-dep:
     name: Declare libdbus dep in Homebrew formula (Linux)
     needs: meta
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.meta.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Patch tap formula
