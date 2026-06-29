@@ -1,6 +1,6 @@
 [package]
 name = "nsql"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Run SQL from your terminal, composed in your real neovim — without taking over the screen."
 license = "0BSD"
