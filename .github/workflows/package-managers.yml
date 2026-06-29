@@ -1,0 +1,184 @@
+name: Package managers
+
+# Runs AFTER cargo-dist's release.yml has built artifacts and published the
+# GitHub Release. Publishes the channels dist does not cover: crates.io, the AUR
+# (source + binary), and a signed apt repo on GitHub Pages. Homebrew is handled
+# by release.yml's publish-homebrew-formula job.
+#
+# Each job is independent: a missing secret fails only that channel.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to package (e.g. v0.1.0). Does NOT publish to crates.io."
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            PRE="false"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+            PRE="${{ github.event.release.prerelease }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+
+  # crates.io publishes are permanent, so only real (non-prerelease) releases —
+  # never a manual dispatch or an -rc tag.
+  crates-io:
+    name: Publish to crates.io
+    needs: meta
+    if: ${{ github.event_name == 'release' && needs.meta.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  aur:
+    name: Publish to the AUR (${{ matrix.pkg }})
+    needs: meta
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.meta.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [nsql, nsql-bin]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp pkgver
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ needs.meta.outputs.version }}/" \
+            "packaging/aur/${{ matrix.pkg }}/PKGBUILD"
+      # Recomputes sha256sums, regenerates .SRCINFO, and pushes to the AUR.
+      - name: Deploy ${{ matrix.pkg }}
+        uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: ${{ matrix.pkg }}
+          pkgbuild: packaging/aur/${{ matrix.pkg }}/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ needs.meta.outputs.version }}"
+          updpkgsums: true
+          ssh_keyscan_types: rsa,ed25519
+
+  debian-apt:
+    name: Build .deb and publish signed apt repo
+    needs: meta
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.meta.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config reprepro gnupg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build .deb
+        run: cargo deb
+      - name: Import GPG signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+      - name: Fetch existing apt repo state (gh-pages)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git clone --branch gh-pages --single-branch \
+               "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" public 2>/dev/null; then
+            rm -rf public/.git
+          else
+            echo "gh-pages does not exist yet; starting a fresh repo"
+            mkdir -p public
+          fi
+      - name: Update apt repository
+        env:
+          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+        run: |
+          mkdir -p public/deb/conf
+          sed "s/__APT_GPG_KEY_ID__/${APT_GPG_KEY_ID}/" \
+            packaging/apt/conf/distributions > public/deb/conf/distributions
+          reprepro -b public/deb includedeb stable target/debian/*.deb
+          gpg --armor --export "${APT_GPG_KEY_ID}" > public/deb/nsql-archive-keyring.asc
+          cp packaging/apt/index.html public/index.html
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+          commit_message: "apt: nsql ${{ needs.meta.outputs.version }}"
+
+  # The prebuilt linux-gnu binary dynamically links libdbus (keyring-store).
+  # cargo-dist's formula doesn't declare it, so patch the tap to add a
+  # Linux-only dependency. macOS uses the Security framework and is unaffected.
+  homebrew-linux-dep:
+    name: Declare libdbus dep in Homebrew formula (Linux)
+    needs: meta
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.meta.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Patch tap formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          # release.yml pushes the formula before publishing the release (which
+          # triggers this workflow), but retry a few times to be safe.
+          f=""
+          for i in 1 2 3 4 5 6; do
+            rm -rf tap
+            if git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/fredrir/homebrew-nsql.git" tap 2>/dev/null; then
+              [ -f tap/Formula/nsql.rb ] && f=tap/Formula/nsql.rb
+              [ -z "$f" ] && [ -f tap/nsql.rb ] && f=tap/nsql.rb
+              [ -n "$f" ] && break
+            fi
+            echo "formula not available yet (attempt $i); waiting..."
+            sleep 15
+          done
+          if [ -z "$f" ]; then
+            echo "::error::Homebrew formula not found in tap after retries"; exit 1
+          fi
+          if grep -q 'depends_on "dbus"' "$f"; then
+            echo "dbus dependency already present; nothing to do"; exit 0
+          fi
+          awk '/< *Formula/ && !d {print; print "  depends_on \"dbus\" if OS.linux?"; d=1; next} 1' "$f" > "$f.tmp"
+          mv -f "$f.tmp" "$f"
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "nsql ${{ needs.meta.outputs.version }}: depend on dbus on Linux"
+          git push
