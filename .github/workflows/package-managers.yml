@@ -40,7 +40,7 @@ jobs:
     if: ${{ github.event_name == 'release' && needs.meta.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.meta.outputs.tag }}
       - name: Install system deps
@@ -61,7 +61,7 @@ jobs:
       matrix:
         pkg: [nsql, nsql-bin]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Stamp pkgver
         run: |
           sed -i "s/^pkgver=.*/pkgver=${{ needs.meta.outputs.version }}/" \
@@ -86,7 +86,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.meta.outputs.tag }}
       - name: Install system deps
