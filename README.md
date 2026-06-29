@@ -46,10 +46,6 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 [GitHub Release](https://github.com/fredrir/nsql/releases).
 
-> **Note:** Neovim is the expected editor but optional — nsql falls back to
-> `$EDITOR`/vim/vi. On Linux the default build links libdbus for OS-keychain storage;
-> if a keychain isn't available, nsql falls back to `PGPASSWORD` / `~/.pgpass` / prompt.
-
 ## Quick start
 
 ```sh
