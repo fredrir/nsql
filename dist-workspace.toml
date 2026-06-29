@@ -1,0 +1,31 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (cargo-dist) — see https://opensource.axo.dev/cargo-dist/
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew"]
+# Homebrew tap to publish the generated formula to (create this repo first).
+tap = "fredrir/homebrew-nsql"
+# Run the Homebrew publish job on release (pushes Formula/nsql.rb to the tap).
+publish-jobs = ["homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# aarch64-linux + windows are deferred (see plan notes): cross-compiling the
+# system libdbus link is fiddly, and the tool is Unix-centric.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+# Whether to install an updater program alongside the software
+install-updater = false
+
+# The default keyring-store feature links system libdbus on Linux, so the
+# linux-gnu build needs the dev headers + pkg-config on the runner.
+[dist.dependencies.apt]
+libdbus-1-dev = "*"
+pkg-config = "*"
