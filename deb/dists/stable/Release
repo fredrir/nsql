@@ -2,19 +2,19 @@ Origin: nsql
 Label: nsql
 Suite: stable
 Codename: stable
-Date: Mon, 29 Jun 2026 21:07:57 UTC
+Date: Sat, 04 Jul 2026 03:43:12 UTC
 Architectures: amd64
 Components: main
 Description: nsql apt repository — https://github.com/fredrir/nsql
 MD5Sum:
- 36bc8a2c10c45da9d096a7e9f176bcc2 829 main/binary-amd64/Packages
- 2d07dc2a1dca82b940f9f91998885769 545 main/binary-amd64/Packages.gz
+ 572d8af185f70548fa6feb1d17823bbe 829 main/binary-amd64/Packages
+ f37fb39d3899540e7073b0bc860e942c 544 main/binary-amd64/Packages.gz
  dae5e2d66ea8763f6f7f761b48d8a71b 146 main/binary-amd64/Release
 SHA1:
- 5fe3f55db97997ab48f801afdb77fc999ba0ef99 829 main/binary-amd64/Packages
- e6b40c7403d4e65894166a5dc14280bd6855f135 545 main/binary-amd64/Packages.gz
+ 0a0e5fc44ccdbf0691b9a27680f8a487ca707af2 829 main/binary-amd64/Packages
+ f6534adc131b483bfa1371654efdc6b672ab8501 544 main/binary-amd64/Packages.gz
  edcf5d9f78ebeff221cccbb0f16559ed028e64a3 146 main/binary-amd64/Release
 SHA256:
- c7d6b3b9945fde24233f728b12e607c850ebd049bd5c8f5937092910a60ead9e 829 main/binary-amd64/Packages
- 976498be70dd49501164b8b26830a3e6d1e93497de6a02889e877fafe87fa5e3 545 main/binary-amd64/Packages.gz
+ 608b8e2ba5bee0b5306e4fdeed3fea0b66851c85e8387fa3af191c7a340fc175 829 main/binary-amd64/Packages
+ f76b3dc90da03333e05bcf84d86ac451a5d4506a3d9ef86bbe1a1e5f8cfeb274 544 main/binary-amd64/Packages.gz
  ee1d8d9bde5bcaac5c4c1971da139411bfa0b0b9981103d2784ded0e71d3af6c 146 main/binary-amd64/Release
