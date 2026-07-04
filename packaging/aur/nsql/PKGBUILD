@@ -28,11 +28,8 @@ build() {
     cargo build --frozen --release
 }
 
-check() {
-    cd "nsql-${pkgver}"
-    export RUSTUP_TOOLCHAIN=stable
-    cargo test --frozen --release
-}
+# No check(): the test suite includes smoke tests that spawn editors and probe
+# local databases, which are not reliable inside a clean build chroot.
 
 package() {
     cd "nsql-${pkgver}"

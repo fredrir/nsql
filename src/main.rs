@@ -90,8 +90,10 @@ fn real_main() -> Result<()> {
         profile.readonly = true;
     }
 
-    let scripted =
-        cli.execute.is_some() || cli.file.is_some() || cli.favorite.is_some() || !std::io::stdin().is_terminal();
+    let scripted = cli.execute.is_some()
+        || cli.file.is_some()
+        || cli.favorite.is_some()
+        || !std::io::stdin().is_terminal();
     if target.is_some() || !scripted {
         let saved = cfg.profiles.iter().any(|p| p.name == profile.name);
         recents::record(&paths, &profile, saved);
@@ -124,13 +126,20 @@ fn real_main() -> Result<()> {
         }
     }
 
-    let echo_text = if echo && out_tty { Some(sql.clone()) } else { None };
+    let echo_text = if echo && out_tty {
+        Some(sql.clone())
+    } else {
+        None
+    };
     let opts = render::Options::from_cli(&cli, out_tty, echo_text, Some(elapsed));
     render::print(&result, &opts)
 }
 
 enum Acquired {
-    Run { sql: String, echo: bool },
+    Run {
+        sql: String,
+        echo: bool,
+    },
     Cancelled,
     #[cfg_attr(not(feature = "embed-editor"), allow(dead_code))]
     Handled,
@@ -159,7 +168,10 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> 
     if !std::io::stdin().is_terminal() {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s)?;
-        return Ok(Acquired::Run { sql: s, echo: false });
+        return Ok(Acquired::Run {
+            sql: s,
+            echo: false,
+        });
     }
     compose(paths, profile, cli)
 }
@@ -173,10 +185,24 @@ fn is_db_url(s: &str) -> bool {
 
 fn extract_target(argv: &mut Vec<String>) -> Option<String> {
     const VALUE_FLAGS: &[&str] = &[
-        "-e", "--execute", "-f", "--file", "-F", "--favorite", "-p", "--profile", "--format",
+        "-e",
+        "--execute",
+        "-f",
+        "--file",
+        "-F",
+        "--favorite",
+        "-p",
+        "--profile",
+        "--format",
     ];
     const SUBCOMMANDS: &[&str] = &[
-        "profiles", "connect", "save", "favorites", "history", "discover", "help",
+        "profiles",
+        "connect",
+        "save",
+        "favorites",
+        "history",
+        "discover",
+        "help",
     ];
     let mut i = 1;
     let mut skip_value = false;
@@ -215,61 +241,12 @@ fn adhoc_name(url: &str) -> String {
         .to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn argv(args: &[&str]) -> Vec<String> {
-        std::iter::once("nsql")
-            .chain(args.iter().copied())
-            .map(String::from)
-            .collect()
-    }
-
-    #[test]
-    fn extracts_leading_url() {
-        let mut a = argv(&["postgres://u:p@h/db", "-e", "select 1"]);
-        assert_eq!(
-            extract_target(&mut a).as_deref(),
-            Some("postgres://u:p@h/db")
-        );
-        assert_eq!(a, argv(&["-e", "select 1"]));
-    }
-
-    #[test]
-    fn extracts_label_and_index_targets() {
-        let mut a = argv(&["staging"]);
-        assert_eq!(extract_target(&mut a).as_deref(), Some("staging"));
-        let mut b = argv(&["2"]);
-        assert_eq!(extract_target(&mut b).as_deref(), Some("2"));
-    }
-
-    #[test]
-    fn does_not_steal_connect_url_or_subcommands() {
-        let mut a = argv(&["connect", "prod", "--url", "postgres://u@h/db"]);
-        assert_eq!(extract_target(&mut a), None);
-        let mut b = argv(&["profiles"]);
-        assert_eq!(extract_target(&mut b), None);
-    }
-
-    #[test]
-    fn target_after_value_flag() {
-        let mut a = argv(&["-p", "x", "sqlite:///t.db"]);
-        assert_eq!(extract_target(&mut a).as_deref(), Some("sqlite:///t.db"));
-    }
-
-    #[test]
-    fn adhoc_name_is_dbname() {
-        assert_eq!(
-            adhoc_name("postgres://u:p@h:5433/pyparser_llunde"),
-            "pyparser_llunde"
-        );
-        assert_eq!(adhoc_name("postgres://u@h/db?sslmode=require"), "db");
-    }
-}
-
 fn compose(paths: &Paths, profile: &Profile, cli: &Cli) -> Result<Acquired> {
-    let portable = if cli.no_clean { false } else { cli.clean || is_ssh() };
+    let portable = if cli.no_clean {
+        false
+    } else {
+        cli.clean || is_ssh()
+    };
 
     #[cfg(feature = "embed-editor")]
     {
@@ -357,7 +334,9 @@ fn run_subcommand(
             };
 
             let pw = if set_password {
-                Some(rpassword::prompt_password(format!("Password for `{name}`: "))?)
+                Some(rpassword::prompt_password(format!(
+                    "Password for `{name}`: "
+                ))?)
             } else {
                 embedded_pw
             };
@@ -412,5 +391,58 @@ fn run_subcommand(
             );
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        std::iter::once("nsql")
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn extracts_leading_url() {
+        let mut a = argv(&["postgres://u:p@h/db", "-e", "select 1"]);
+        assert_eq!(
+            extract_target(&mut a).as_deref(),
+            Some("postgres://u:p@h/db")
+        );
+        assert_eq!(a, argv(&["-e", "select 1"]));
+    }
+
+    #[test]
+    fn extracts_label_and_index_targets() {
+        let mut a = argv(&["staging"]);
+        assert_eq!(extract_target(&mut a).as_deref(), Some("staging"));
+        let mut b = argv(&["2"]);
+        assert_eq!(extract_target(&mut b).as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn does_not_steal_connect_url_or_subcommands() {
+        let mut a = argv(&["connect", "prod", "--url", "postgres://u@h/db"]);
+        assert_eq!(extract_target(&mut a), None);
+        let mut b = argv(&["profiles"]);
+        assert_eq!(extract_target(&mut b), None);
+    }
+
+    #[test]
+    fn target_after_value_flag() {
+        let mut a = argv(&["-p", "x", "sqlite:///t.db"]);
+        assert_eq!(extract_target(&mut a).as_deref(), Some("sqlite:///t.db"));
+    }
+
+    #[test]
+    fn adhoc_name_is_dbname() {
+        assert_eq!(
+            adhoc_name("postgres://u:p@h:5433/pyparser_llunde"),
+            "pyparser_llunde"
+        );
+        assert_eq!(adhoc_name("postgres://u@h/db?sslmode=require"), "db");
     }
 }

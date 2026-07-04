@@ -170,7 +170,10 @@ mod tests {
 
     #[test]
     fn sqlite_target_parsing() {
-        assert_eq!(prof("sqlite:///home/x/dev.db").sqlite_target(), "/home/x/dev.db");
+        assert_eq!(
+            prof("sqlite:///home/x/dev.db").sqlite_target(),
+            "/home/x/dev.db"
+        );
         assert_eq!(prof("sqlite::memory:").sqlite_target(), ":memory:");
     }
 }

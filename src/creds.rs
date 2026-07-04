@@ -63,7 +63,9 @@ fn pgpass_lookup(id: &PgIdentity) -> Option<String> {
 
     let path = std::env::var_os("PGPASSFILE")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".pgpass")))?;
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".pgpass"))
+        })?;
 
     if std::fs::symlink_metadata(&path)
         .map(|m| m.file_type().is_symlink())
@@ -143,7 +145,8 @@ mod tests {
 
     #[test]
     fn identity_parsing_and_key() {
-        let id = pg_identity("postgres://alice:secret@db.host:5433/payments?sslmode=require").unwrap();
+        let id =
+            pg_identity("postgres://alice:secret@db.host:5433/payments?sslmode=require").unwrap();
         assert_eq!(id.user, "alice");
         assert_eq!(id.host, "db.host");
         assert_eq!(id.port, 5433);

@@ -4,18 +4,18 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use nvim_rs::compat::tokio::Compat;
 use nvim_rs::{Handler, Neovim, UiAttachOptions, Value};
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
 };
-use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
-use std::collections::HashMap;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::process::{ChildStdin, Command};
@@ -322,7 +322,12 @@ fn render_outcome(res: &Result<db::QueryResult>, sql: &str) -> Outcome {
     let fmt = |result, f| {
         render::format(
             result,
-            &render::Options { format: f, is_tty: false, echo: None, elapsed: None },
+            &render::Options {
+                format: f,
+                is_tty: false,
+                echo: None,
+                elapsed: None,
+            },
         )
     };
     match res {
@@ -353,7 +358,11 @@ fn render_persist(result: &db::QueryResult, sql: &str) -> String {
         db::QueryResult::Affected { changes } => {
             let _ = writeln!(out, "-- ✓ {changes} row(s) affected");
         }
-        db::QueryResult::Rows { columns, rows, truncated } => {
+        db::QueryResult::Rows {
+            columns,
+            rows,
+            truncated,
+        } => {
             if columns.is_empty() {
                 let _ = writeln!(out, "-- (0 rows)");
                 return out;
@@ -366,7 +375,10 @@ fn render_persist(result: &db::QueryResult, sql: &str) -> String {
                 .iter()
                 .map(|r| (0..ncol).map(|i| buf_cell(r.get(i))).collect())
                 .collect();
-            let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count().min(MAXW)).collect();
+            let mut widths: Vec<usize> = columns
+                .iter()
+                .map(|c| c.chars().count().min(MAXW))
+                .collect();
             for row in &disp {
                 for (i, c) in row.iter().enumerate() {
                     if i < ncol {
@@ -377,10 +389,10 @@ fn render_persist(result: &db::QueryResult, sql: &str) -> String {
             let sep = "  ";
             let row_line = |cells: &dyn Fn(usize) -> String| {
                 let mut line = String::new();
-                for i in 0..ncol {
-                    let s = truncate_disp(&cells(i), widths[i]);
+                for (i, w) in widths.iter().enumerate().take(ncol) {
+                    let s = truncate_disp(&cells(i), *w);
                     line.push_str(&s);
-                    push_pad(&mut line, widths[i].saturating_sub(s.chars().count()));
+                    push_pad(&mut line, w.saturating_sub(s.chars().count()));
                     if i + 1 < ncol {
                         line.push_str(sep);
                     }
@@ -392,9 +404,16 @@ fn render_persist(result: &db::QueryResult, sql: &str) -> String {
                 let _ = writeln!(out, "{}", row_line(&|i| r[i].clone()));
             }
             if truncated.is_some() {
-                let _ = writeln!(out, "-- first {total} rows (capped) · ,a or `nsql -e` for all");
+                let _ = writeln!(
+                    out,
+                    "-- first {total} rows (capped) · ,a or `nsql -e` for all"
+                );
             } else if total > show.len() {
-                let _ = writeln!(out, "-- {total} rows ({} shown) · `nsql -e` for all", show.len());
+                let _ = writeln!(
+                    out,
+                    "-- {total} rows ({} shown) · `nsql -e` for all",
+                    show.len()
+                );
             } else {
                 let _ = writeln!(out, "-- {total} row{}", if total == 1 { "" } else { "s" });
             }
@@ -415,14 +434,27 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
         Ok(r) => r,
         Err(e) => {
             let msg = format!("  error: {}", first_line(&format!("{e:#}")));
-            let mark = CellMark { line: 0, col: 0, end: msg.len(), hl: "ErrorMsg" };
+            let mark = CellMark {
+                line: 0,
+                col: 0,
+                end: msg.len(),
+                hl: "ErrorMsg",
+            };
             return (String::new(), vec![msg], vec![mark]);
         }
     };
     let (columns, rows, truncated) = match result {
-        db::QueryResult::Rows { columns, rows, truncated } => (columns, rows, *truncated),
+        db::QueryResult::Rows {
+            columns,
+            rows,
+            truncated,
+        } => (columns, rows, *truncated),
         db::QueryResult::Affected { changes } => {
-            return (String::new(), vec![format!("  ✓ OK — {changes} row(s) affected")], Vec::new());
+            return (
+                String::new(),
+                vec![format!("  ✓ OK — {changes} row(s) affected")],
+                Vec::new(),
+            );
         }
     };
     if columns.is_empty() {
@@ -432,13 +464,20 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
     const MAXW: usize = 60;
     const MAX_BUF_ROWS: usize = 2000;
     let total = rows.len();
-    let rows: &[Vec<db::Cell>] = if total > MAX_BUF_ROWS { &rows[..MAX_BUF_ROWS] } else { rows };
+    let rows: &[Vec<db::Cell>] = if total > MAX_BUF_ROWS {
+        &rows[..MAX_BUF_ROWS]
+    } else {
+        rows
+    };
     let ncol = columns.len();
     let disp: Vec<Vec<String>> = rows
         .iter()
         .map(|r| (0..ncol).map(|i| buf_cell(r.get(i))).collect())
         .collect();
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count().min(MAXW)).collect();
+    let mut widths: Vec<usize> = columns
+        .iter()
+        .map(|c| c.chars().count().min(MAXW))
+        .collect();
     for row in &disp {
         for (i, c) in row.iter().enumerate() {
             if i < ncol {
@@ -490,7 +529,12 @@ fn format_for_buffer(res: &Result<db::QueryResult>) -> (String, Vec<String>, Vec
         format!("{total} row{}", if total == 1 { "" } else { "s" })
     };
     let hl = if more { "WarningMsg" } else { "Comment" };
-    marks.push(CellMark { line: lines.len(), col: 0, end: footer.len(), hl });
+    marks.push(CellMark {
+        line: lines.len(),
+        col: 0,
+        end: footer.len(),
+        hl,
+    });
     lines.push(footer);
 
     (header, lines, marks)
@@ -981,7 +1025,10 @@ fn render_row(grid: &Grid, row: &[GCell], width: usize) -> Line<'static> {
         let style = resolve_style(grid, cell.hl);
         if cur != Some(style) {
             if !buf.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut buf), cur.unwrap_or_default()));
+                spans.push(Span::styled(
+                    std::mem::take(&mut buf),
+                    cur.unwrap_or_default(),
+                ));
             }
             cur = Some(style);
         }
@@ -1020,7 +1067,11 @@ fn resolve_style(grid: &Grid, hl: u16) -> Style {
 }
 
 fn rgb(v: u32) -> Color {
-    Color::Rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
+    Color::Rgb(
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        (v & 0xff) as u8,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1093,7 +1144,9 @@ impl Grid {
 
 fn apply_redraw(grid: &mut Grid, batch: &[Value]) {
     for group in batch {
-        let Some(items) = group.as_array() else { continue };
+        let Some(items) = group.as_array() else {
+            continue;
+        };
         let Some(name) = items.first().and_then(|v| v.as_str()) else {
             continue;
         };
@@ -1144,8 +1197,12 @@ fn parse_hl(p: &[Value]) -> Option<(u16, Attr)> {
     let m = p.get(1)?;
     let b = |key: &str| map_get(m, key).and_then(|v| v.as_bool()).unwrap_or(false);
     let attr = Attr {
-        fg: map_get(m, "foreground").and_then(|v| v.as_u64()).map(|v| v as u32),
-        bg: map_get(m, "background").and_then(|v| v.as_u64()).map(|v| v as u32),
+        fg: map_get(m, "foreground")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
+        bg: map_get(m, "background")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
         bold: b("bold"),
         italic: b("italic"),
         underline: b("underline") || b("undercurl") || b("underdouble"),
@@ -1184,7 +1241,12 @@ fn apply_grid_line(grid: &mut Grid, p: &[Value]) {
             last_hl = h as u16;
         }
         let remaining = grid.w.saturating_sub(col) as u64;
-        let repeat = c.get(2).and_then(|v| v.as_u64()).unwrap_or(1).max(1).min(remaining);
+        let repeat = c
+            .get(2)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .max(1)
+            .min(remaining);
         let ch = text.chars().next().unwrap_or(' ');
         for _ in 0..repeat {
             grid.cells[row][col] = GCell { ch, hl: last_hl };
@@ -1276,7 +1338,11 @@ impl Handler for RedrawHandler {
                 let _ = self.run_tx.send(RunMsg::Run { sql, force, all });
             }
             "nsql_export" => {
-                let fmt = args.first().and_then(|v| v.as_str()).unwrap_or("json").to_string();
+                let fmt = args
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("json")
+                    .to_string();
                 let _ = self.run_tx.send(RunMsg::Export(fmt));
             }
             "nsql_yank" => {
@@ -1331,7 +1397,11 @@ mod tests {
             &mut g,
             &[Value::Array(vec![
                 Value::from("default_colors_set"),
-                Value::Array(vec![Value::from(0xeeeeeeu64), Value::from(0x111111u64), Value::from(0)]),
+                Value::Array(vec![
+                    Value::from(0xeeeeeeu64),
+                    Value::from(0x111111u64),
+                    Value::from(0),
+                ]),
             ])],
         );
         assert_eq!(g.def_fg, Some(0xeeeeee));
@@ -1344,7 +1414,12 @@ mod tests {
             &mut g,
             &[Value::Array(vec![
                 Value::from("hl_attr_define"),
-                Value::Array(vec![Value::from(7u64), attrmap, Value::Map(vec![]), Value::Array(vec![])]),
+                Value::Array(vec![
+                    Value::from(7u64),
+                    attrmap,
+                    Value::Map(vec![]),
+                    Value::Array(vec![]),
+                ]),
             ])],
         );
         let a = g.hl.get(&7).copied().unwrap();
@@ -1369,13 +1444,15 @@ mod tests {
             let mut cmd = Command::new("nvim");
             cmd.arg("--embed").arg("--clean").arg(&tmp);
             let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<Vec<Value>>();
-            let (nvim, _io, mut child) =
-                nvim_rs::create::tokio::new_child_cmd(
-                    &mut cmd,
-                    RedrawHandler { tx: redraw_tx, run_tx: mpsc::unbounded_channel().0 },
-                )
-                    .await
-                    .expect("spawn nvim --embed");
+            let (nvim, _io, mut child) = nvim_rs::create::tokio::new_child_cmd(
+                &mut cmd,
+                RedrawHandler {
+                    tx: redraw_tx,
+                    run_tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .await
+            .expect("spawn nvim --embed");
 
             let mut opts = UiAttachOptions::new();
             opts.set_linegrid_external(true);
@@ -1455,13 +1532,15 @@ mod tests {
             let mut cmd = Command::new("nvim");
             cmd.arg("--embed").arg("--clean");
             let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<Vec<Value>>();
-            let (nvim, _io, mut child) =
-                nvim_rs::create::tokio::new_child_cmd(
-                    &mut cmd,
-                    RedrawHandler { tx: redraw_tx, run_tx: mpsc::unbounded_channel().0 },
-                )
-                    .await
-                    .expect("spawn");
+            let (nvim, _io, mut child) = nvim_rs::create::tokio::new_child_cmd(
+                &mut cmd,
+                RedrawHandler {
+                    tx: redraw_tx,
+                    run_tx: mpsc::unbounded_channel().0,
+                },
+            )
+            .await
+            .expect("spawn");
             let mut opts = UiAttachOptions::new();
             opts.set_linegrid_external(true);
             opts.set_rgb(true);
@@ -1533,16 +1612,25 @@ mod tests {
         let csv = o.csv.expect("csv");
         assert!(csv.contains("answer"));
         let persist = o.persist.expect("persist");
-        assert!(persist.contains("-- select 7 as answer"), "persist must echo the query");
+        assert!(
+            persist.contains("-- select 7 as answer"),
+            "persist must echo the query"
+        );
         assert!(persist.contains('7') && persist.contains("answer"));
-        assert!(persist.contains("-- 1 row"), "persist needs a concise summary line");
+        assert!(
+            persist.contains("-- 1 row"),
+            "persist needs a concise summary line"
+        );
     }
 
     #[test]
     fn render_outcome_error_does_not_persist() {
         let err: Result<db::QueryResult> = Err(anyhow!("kaboom"));
         let o = render_outcome(&err, "select 1");
-        assert!(o.persist.is_none(), "an error must not overwrite the persisted result");
+        assert!(
+            o.persist.is_none(),
+            "an error must not overwrite the persisted result"
+        );
         assert!(o.json.is_none() && o.csv.is_none());
     }
 
@@ -1568,11 +1656,20 @@ mod tests {
             );
         }
         assert!(lines[0].contains("42") && lines[0].contains("widget"));
-        assert!(lines.iter().any(|l| l.contains('∅')), "NULL needs a distinct glyph");
+        assert!(
+            lines.iter().any(|l| l.contains('∅')),
+            "NULL needs a distinct glyph"
+        );
 
         assert_eq!(classify("42", Some(&db::Cell::Int(42))), "Number");
-        assert_eq!(classify("widget", Some(&db::Cell::Text("widget".into()))), "String");
-        assert_eq!(classify("2026-06-10", Some(&db::Cell::Text("2026-06-10".into()))), "Constant");
+        assert_eq!(
+            classify("widget", Some(&db::Cell::Text("widget".into()))),
+            "String"
+        );
+        assert_eq!(
+            classify("2026-06-10", Some(&db::Cell::Text("2026-06-10".into()))),
+            "Constant"
+        );
         assert_eq!(classify("99", Some(&db::Cell::Text("99".into()))), "Number");
         assert_eq!(classify("", Some(&db::Cell::Null)), "Comment");
         assert!(marks.iter().any(|m| m.hl == "Number" && m.line == 0));
@@ -1604,19 +1701,37 @@ mod tests {
         let schema = introspect_schema(&prof).expect("schema");
         let get = |v: &Value, k: &str| -> Option<Value> {
             if let Value::Map(m) = v {
-                m.iter().find(|(kk, _)| kk.as_str() == Some(k)).map(|(_, vv)| vv.clone())
+                m.iter()
+                    .find(|(kk, _)| kk.as_str() == Some(k))
+                    .map(|(_, vv)| vv.clone())
             } else {
                 None
             }
         };
         let tables = get(&schema, "tables").unwrap();
-        let tnames: Vec<&str> = tables.as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
-        assert!(tnames.contains(&"cat") && tnames.contains(&"dog"), "tables: {tnames:?}");
+        let tnames: Vec<&str> = tables
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(
+            tnames.contains(&"cat") && tnames.contains(&"dog"),
+            "tables: {tnames:?}"
+        );
 
         let by_table = get(&schema, "by_table").unwrap();
         let cat_cols = get(&by_table, "cat").unwrap();
-        let cnames: Vec<&str> = cat_cols.as_array().unwrap().iter().filter_map(|c| c.as_str()).collect();
-        assert!(cnames.contains(&"name") && cnames.contains(&"age"), "cat cols: {cnames:?}");
+        let cnames: Vec<&str> = cat_cols
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .collect();
+        assert!(
+            cnames.contains(&"name") && cnames.contains(&"age"),
+            "cat cols: {cnames:?}"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1625,7 +1740,10 @@ mod tests {
     fn default_background_is_transparent() {
         let mut g = Grid::new(2, 1);
         g.def_bg = Some(0x112233);
-        assert!(resolve_style(&g, 0).bg.is_none(), "default bg must be transparent");
+        assert!(
+            resolve_style(&g, 0).bg.is_none(),
+            "default bg must be transparent"
+        );
         g.hl.insert(
             1,
             Attr {
@@ -1685,10 +1803,15 @@ mod tests {
                 .arg(format!("luafile {}", inject.display()));
             let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<Vec<Value>>();
             let (run_tx, mut run_rx) = mpsc::unbounded_channel::<RunMsg>();
-            let (nvim, _io, mut child) =
-                nvim_rs::create::tokio::new_child_cmd(&mut cmd, RedrawHandler { tx: redraw_tx, run_tx })
-                    .await
-                    .expect("spawn");
+            let (nvim, _io, mut child) = nvim_rs::create::tokio::new_child_cmd(
+                &mut cmd,
+                RedrawHandler {
+                    tx: redraw_tx,
+                    run_tx,
+                },
+            )
+            .await
+            .expect("spawn");
             let mut o = UiAttachOptions::new();
             o.set_linegrid_external(true);
             o.set_rgb(true);

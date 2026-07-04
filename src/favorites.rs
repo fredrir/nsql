@@ -17,8 +17,7 @@ pub fn save(paths: &Paths, name: &str, content: &str) -> Result<PathBuf> {
 
 pub fn load(paths: &Paths, name: &str) -> Result<String> {
     let p = path_for(paths, name)?;
-    std::fs::read_to_string(&p)
-        .with_context(|| format!("no favorite `{name}` ({})", p.display()))
+    std::fs::read_to_string(&p).with_context(|| format!("no favorite `{name}` ({})", p.display()))
 }
 
 pub fn list(paths: &Paths) -> Result<Vec<String>> {

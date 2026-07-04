@@ -37,7 +37,10 @@ pub fn run(profile: &Profile, sql: &str, all: bool) -> Result<QueryResult> {
             profile.name,
             util::redact_url(&profile.url)
         ),
-        other => bail!("unsupported url scheme `{other}` in profile `{}`", profile.name),
+        other => bail!(
+            "unsupported url scheme `{other}` in profile `{}`",
+            profile.name
+        ),
     }
 }
 

@@ -114,7 +114,11 @@ pub fn format(result: &QueryResult, opts: &Options) -> String {
             }
             let n = rows.len();
             if human {
-                let suffix = if truncated.is_some() { " (capped, ,a for all)" } else { "" };
+                let suffix = if truncated.is_some() {
+                    " (capped, ,a for all)"
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     out,
                     "({n} row{}{timing}{suffix})",
@@ -186,7 +190,11 @@ fn render_csv(out: &mut String, columns: &[String], rows: &[Vec<Cell>]) {
     let _ = writeln!(
         out,
         "{}",
-        columns.iter().map(|c| csv_field(&sanitize(c))).collect::<Vec<_>>().join(",")
+        columns
+            .iter()
+            .map(|c| csv_field(&sanitize(c)))
+            .collect::<Vec<_>>()
+            .join(",")
     );
     for row in rows {
         let _ = writeln!(
@@ -243,7 +251,11 @@ fn display_cell(cell: &Cell) -> String {
 }
 
 fn blob_hex(b: &[u8]) -> String {
-    let shown: String = b.iter().take(BLOB_PREVIEW).map(|x| format!("{x:02x}")).collect();
+    let shown: String = b
+        .iter()
+        .take(BLOB_PREVIEW)
+        .map(|x| format!("{x:02x}"))
+        .collect();
     if b.len() > BLOB_PREVIEW {
         format!("\\x{shown}\u{2026} ({} bytes)", b.len())
     } else {

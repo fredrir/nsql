@@ -3,6 +3,13 @@ name: Auto release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - ".github/**"
+      - "**.md"
+      - "assets/**"
+      - "LICENSE"
+  # Manual escape hatch: cut a release for commits that only touch ignored paths.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -32,12 +39,19 @@ jobs:
         run: |
           set -euo pipefail
           latest=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          cargo_v=$(sed -nE '0,/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/s//\1/p' Cargo.toml)
           if [ -z "$latest" ]; then
-            next=$(sed -nE '0,/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/s//\1/p' Cargo.toml)
+            next="$cargo_v"
           else
             v=${latest#v}
             major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}; patch=${rest##*.}
             next="$major.$minor.$((patch+1))"
+            # A manual bump in Cargo.toml beyond the computed patch wins
+            # (e.g. someone set 0.2.0 while the latest tag is v0.1.2).
+            if ! git rev-parse "v$cargo_v" >/dev/null 2>&1 && \
+               [ "$(printf '%s\n%s\n' "$next" "$cargo_v" | sort -V | tail -n1)" = "$cargo_v" ]; then
+              next="$cargo_v"
+            fi
           fi
           echo "next=$next" >> "$GITHUB_OUTPUT"
       - run: |

@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -20,11 +24,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: rustfmt (advisory)
-        continue-on-error: true
+      - name: rustfmt
         run: cargo fmt --all -- --check
-      - name: clippy (advisory)
-        continue-on-error: true
+      - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:

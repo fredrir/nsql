@@ -84,8 +84,7 @@ const INIT_LUA: &str = include_str!("../assets/nsql_init.lua");
 pub(crate) fn write_inject(paths: &Paths) -> Result<()> {
     std::fs::write(&paths.inject_lua, INJECT_LUA)
         .with_context(|| format!("writing {}", paths.inject_lua.display()))?;
-    std::fs::write(portable_init_path(paths), INIT_LUA)
-        .with_context(|| "writing nsql_init.lua")?;
+    std::fs::write(portable_init_path(paths), INIT_LUA).with_context(|| "writing nsql_init.lua")?;
     Ok(())
 }
 

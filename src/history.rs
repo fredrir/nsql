@@ -41,9 +41,8 @@ pub fn list(paths: &Paths, limit: usize) -> Result<()> {
         return Ok(());
     }
     let conn = open(paths)?;
-    let mut stmt = conn.prepare(
-        "SELECT ts, profile, sql FROM history ORDER BY id DESC LIMIT ?1",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT ts, profile, sql FROM history ORDER BY id DESC LIMIT ?1")?;
     let rows = stmt.query_map([limit as i64], |r| {
         Ok((
             r.get::<_, i64>(0)?,

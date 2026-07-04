@@ -125,7 +125,10 @@ mod tests {
         record(&p, &prof("local", "sqlite:///tmp/x.db"), false);
 
         let raw = std::fs::read_to_string(&p.recents_file).unwrap();
-        assert!(!raw.contains("secret"), "password leaked into recents: {raw}");
+        assert!(
+            !raw.contains("secret"),
+            "password leaked into recents: {raw}"
+        );
         assert_eq!(most_recent(&p).unwrap().label, "local");
         assert_eq!(resolve(&p, "1").unwrap().label, "local");
         assert_eq!(resolve(&p, "app").unwrap().url, "postgres://u@h:5432/app");

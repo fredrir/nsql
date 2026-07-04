@@ -44,7 +44,10 @@ fn execute_prints_result_and_no_altscreen() {
     assert!(ok, "nsql -e failed: {stderr}");
     assert!(stdout.contains('7'), "missing value 7 in: {stdout}");
     assert!(stdout.contains("answer"), "missing header in: {stdout}");
-    assert!(!stdout.contains(SMCUP) && !stderr.contains(SMCUP), "emitted alt-screen escape!");
+    assert!(
+        !stdout.contains(SMCUP) && !stderr.contains(SMCUP),
+        "emitted alt-screen escape!"
+    );
 }
 
 #[test]
@@ -78,9 +81,15 @@ fn editor_loop_runs_saved_buffer() {
         &home,
     );
     assert!(ok, "nsql --edit failed: {stderr}");
-    assert!(stdout.contains("42"), "missing value 42 in: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("42"),
+        "missing value 42 in: {stdout}\nstderr: {stderr}"
+    );
     assert!(stdout.contains("life"), "missing column in: {stdout}");
-    assert!(!stdout.contains(SMCUP) && !stderr.contains(SMCUP), "emitted alt-screen escape!");
+    assert!(
+        !stdout.contains(SMCUP) && !stderr.contains(SMCUP),
+        "emitted alt-screen escape!"
+    );
 }
 
 #[test]
@@ -100,8 +109,14 @@ fn editor_cancel_runs_nothing() {
         &home,
     );
     assert!(ok, "cancel should be a clean exit: {stderr}");
-    assert!(stderr.contains("cancelled"), "expected a cancel notice: {stderr}");
-    assert!(stdout.trim().is_empty(), "cancel should print no result: {stdout}");
+    assert!(
+        stderr.contains("cancelled"),
+        "expected a cancel notice: {stderr}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "cancel should print no result: {stdout}"
+    );
 }
 
 #[test]
@@ -129,7 +144,10 @@ fn postgres_backend_when_available() {
     assert!(ok, "pg select failed: {stderr}");
     assert!(stdout.contains('7'), "missing value: {stdout}");
     assert!(stdout.contains("(null)"), "NULL not distinct: {stdout}");
-    assert!(!stdout.contains(SMCUP) && !stderr.contains(SMCUP), "emitted alt-screen escape!");
+    assert!(
+        !stdout.contains(SMCUP) && !stderr.contains(SMCUP),
+        "emitted alt-screen escape!"
+    );
 }
 
 #[test]
@@ -139,13 +157,21 @@ fn adhoc_url_runs_without_a_profile() {
     let url = format!("sqlite://{}", db.display());
 
     let (_o, e, ok) = run(
-        &[&url, "-e", "create table t(x int); insert into t values (1),(2),(3)"],
+        &[
+            &url,
+            "-e",
+            "create table t(x int); insert into t values (1),(2),(3)",
+        ],
         &[],
         &home,
     );
     assert!(ok, "ad-hoc DDL failed: {e}");
 
-    let (stdout, stderr, ok) = run(&[&url, "--json", "-e", "select count(*) as n from t"], &[], &home);
+    let (stdout, stderr, ok) = run(
+        &[&url, "--json", "-e", "select count(*) as n from t"],
+        &[],
+        &home,
+    );
     assert!(ok, "ad-hoc select failed: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     assert_eq!(v[0]["n"], 3);
@@ -155,23 +181,13 @@ fn adhoc_url_runs_without_a_profile() {
 fn readonly_profile_blocks_writes() {
     let home = unique_dir("ro");
     let (_o, e, ok) = run(
-        &[
-            "connect",
-            "ro",
-            "--url",
-            "sqlite::memory:",
-            "--readonly",
-        ],
+        &["connect", "ro", "--url", "sqlite::memory:", "--readonly"],
         &[],
         &home,
     );
     assert!(ok, "connect failed: {e}");
 
-    let (_stdout, stderr, ok) = run(
-        &["@ro", "-e", "create table t(x int)"],
-        &[],
-        &home,
-    );
+    let (_stdout, stderr, ok) = run(&["@ro", "-e", "create table t(x int)"], &[], &home);
     assert!(!ok, "read-only profile should reject a write");
     assert!(stderr.contains("read-only"), "unexpected error: {stderr}");
 }
