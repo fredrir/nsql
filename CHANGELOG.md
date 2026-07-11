@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.12] - 2026-07-11
+
+### Changed
+- deps: duckdb 1.10504 (dependabot #8), verified with duckdb-backend feature
+
 ## [0.1.11] - 2026-07-11
 
 ### Changed
