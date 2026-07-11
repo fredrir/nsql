@@ -2,14 +2,6 @@ use crate::config::Profile;
 use crate::db;
 use nvim_rs::Value;
 
-const SQLITE_SCHEMA_Q: &str = "SELECT m.name, p.name FROM sqlite_master m \
-     JOIN pragma_table_info(m.name) p \
-     WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' \
-     ORDER BY m.name, p.cid";
-const PG_SCHEMA_Q: &str = "SELECT table_name, column_name FROM information_schema.columns \
-     WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
-     ORDER BY table_name, ordinal_position";
-
 /// Strictly on-demand (`<C-x><C-o>`) — no CursorMovedI/TextChangedI feeding; an
 /// auto-popup variant doubled typed characters (see .docs/ERGONOMICS.md).
 pub(super) const OMNI_LUA: &str = r#"
@@ -139,11 +131,7 @@ end)
 "#;
 
 pub(super) fn introspect_schema(profile: &Profile) -> Option<Value> {
-    let q = match profile.scheme() {
-        "sqlite" => SQLITE_SCHEMA_Q,
-        "postgres" | "postgresql" => PG_SCHEMA_Q,
-        _ => return None,
-    };
+    let q = crate::introspect::completion_query(profile.scheme())?;
     let rows = match db::run(profile, q, true).ok()? {
         db::QueryResult::Rows { rows, .. } => rows,
         _ => return None,

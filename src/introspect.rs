@@ -105,21 +105,26 @@ fn split_qualified(name: &str) -> (Option<&str>, &str) {
     }
 }
 
-/// Table/column identifiers for the editor completion dictionary.
+/// Table/column identifiers for editor completion (the classic editor's
+/// dictionary and the embed session's schema). Rows are ordered by table so
+/// consumers can group by consecutive table name.
 pub fn completion_query(scheme: &str) -> Option<&'static str> {
     match scheme {
         "sqlite" => Some(
             "SELECT m.name, p.name FROM sqlite_master m \
              JOIN pragma_table_info(m.name) p \
-             WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%'",
+             WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' \
+             ORDER BY m.name, p.cid",
         ),
         "postgres" | "postgresql" | "duckdb" => Some(
             "SELECT table_name, column_name FROM information_schema.columns \
-             WHERE table_schema NOT IN ('pg_catalog','information_schema')",
+             WHERE table_schema NOT IN ('pg_catalog','information_schema') \
+             ORDER BY table_name, ordinal_position",
         ),
         "mysql" | "mariadb" => Some(
             "SELECT table_name, column_name FROM information_schema.columns \
-             WHERE table_schema = DATABASE()",
+             WHERE table_schema = DATABASE() \
+             ORDER BY table_name, ordinal_position",
         ),
         _ => None,
     }

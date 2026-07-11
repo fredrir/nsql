@@ -16,6 +16,17 @@ pub fn pg_identity(url: &str) -> Option<PgIdentity> {
     url_identity(url, 5432)
 }
 
+/// Identity with the scheme's default port, so keyring entries stored at
+/// `connect` time match what the backend looks up (mysql defaults to 3306,
+/// not 5432).
+pub fn identity(url: &str) -> Option<PgIdentity> {
+    let default_port = match url.split(':').next().unwrap_or("") {
+        "mysql" | "mariadb" => 3306,
+        _ => 5432,
+    };
+    url_identity(url, default_port)
+}
+
 pub fn url_identity(url: &str, default_port: u16) -> Option<PgIdentity> {
     let rest = url.split_once("://")?.1;
     let (authority, after) = rest.split_once('/').unwrap_or((rest, ""));
@@ -160,6 +171,16 @@ mod tests {
         let id2 = pg_identity("postgres://just.host/mydb").unwrap();
         assert_eq!(id2.port, 5432);
         assert_eq!(id2.db, "mydb");
+    }
+
+    #[test]
+    fn identity_uses_scheme_default_port() {
+        let pg = identity("postgres://u@h/db").unwrap();
+        assert_eq!(pg.port, 5432);
+        let my = identity("mysql://u@h/db").unwrap();
+        assert_eq!(my.port, 3306);
+        let ma = identity("mariadb://u@h/db").unwrap();
+        assert_eq!(ma.port, 3306);
     }
 
     #[test]

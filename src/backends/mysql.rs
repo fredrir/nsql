@@ -7,6 +7,22 @@ use mysql::prelude::Queryable;
 
 pub struct MyConn {
     conn: mysql::Conn,
+    opts: mysql::Opts,
+    thread_id: u32,
+}
+
+impl MyConn {
+    /// MySQL has no wire-level cancel; a second connection issuing
+    /// `KILL QUERY <id>` is the standard mechanism.
+    pub fn cancel_closure(&self) -> Box<dyn Fn() + Send> {
+        let opts = self.opts.clone();
+        let id = self.thread_id;
+        Box::new(move || {
+            if let Ok(mut killer) = mysql::Conn::new(opts.clone()) {
+                let _ = killer.query_drop(format!("KILL QUERY {id}"));
+            }
+        })
+    }
 }
 
 pub fn connect(profile: &Profile) -> Result<MyConn> {
@@ -27,7 +43,8 @@ pub fn connect(profile: &Profile) -> Result<MyConn> {
     }
     builder = builder.tcp_connect_timeout(Some(std::time::Duration::from_secs(8)));
 
-    let mut conn = mysql::Conn::new(builder)
+    let opts = mysql::Opts::from(builder);
+    let mut conn = mysql::Conn::new(opts.clone())
         .with_context(|| format!("connecting to {}", util::redact_url(&profile.url)))?;
 
     // Statement timeout, best effort: MySQL ≥5.7 (ms, SELECT only) and the
@@ -39,7 +56,12 @@ pub fn connect(profile: &Profile) -> Result<MyConn> {
             .context("enforcing read-only session")?;
     }
 
-    Ok(MyConn { conn })
+    let thread_id = conn.connection_id();
+    Ok(MyConn {
+        conn,
+        opts,
+        thread_id,
+    })
 }
 
 fn resolve_password(profile: &Profile) -> Option<String> {

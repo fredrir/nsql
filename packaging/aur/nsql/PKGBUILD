@@ -38,5 +38,6 @@ package() {
     cd "nsql-${pkgver}"
     install -Dm755 "target/release/nsql" "${pkgdir}/usr/bin/nsql"
     install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 "THIRD-PARTY-LICENSES.md" "${pkgdir}/usr/share/licenses/${pkgname}/THIRD-PARTY-LICENSES.md"
     install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
 }

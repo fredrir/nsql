@@ -87,7 +87,7 @@ impl Conn {
             }
             Conn::Pg(c) => Some(c.cancel_closure()),
             #[cfg(feature = "mysql-backend")]
-            Conn::MySql(_) => None,
+            Conn::MySql(c) => Some(c.cancel_closure()),
             #[cfg(feature = "duckdb-backend")]
             Conn::Duck(c) => Some(c.cancel_closure()),
         }

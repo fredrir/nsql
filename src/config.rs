@@ -50,6 +50,9 @@ pub struct Config {
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_height: Option<u16>,
+    /// Default NULL rendering (--null overrides per invocation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_glyph: Option<String>,
     #[serde(default, rename = "profile")]
     pub profiles: Vec<Profile>,
 }
@@ -108,6 +111,7 @@ impl Config {
         let cfg = Config {
             default: Some("local".to_string()),
             pane_height: None,
+            null_glyph: None,
             profiles: vec![Profile {
                 name: "local".to_string(),
                 url: format!("sqlite://{}", paths.default_db.display()),

@@ -48,11 +48,14 @@ fn real_main() -> Result<()> {
 
     let target = extract_target(&mut argv);
 
-    let cli = Cli::parse_from(argv);
+    let mut cli = Cli::parse_from(argv);
     let profile_override = profile_at.or_else(|| cli.profile.clone());
 
     let paths = Paths::resolve()?;
     let mut cfg = Config::load_or_init(&paths)?;
+    if cli.null.is_none() {
+        cli.null = cfg.null_glyph.clone();
+    }
 
     if let Some(cmd) = cli.command {
         return run_subcommand(
@@ -75,7 +78,7 @@ fn real_main() -> Result<()> {
     let profile = if let Some(t) = &target {
         if is_db_url(t) {
             if let Some(pw) = util::url_password(t) {
-                if let Some(key) = creds::pg_identity(t).map(|id| creds::identity_key(&id)) {
+                if let Some(key) = creds::identity(t).map(|id| creds::identity_key(&id)) {
                     if let Err(e) = secrets::set(&key, &pw) {
                         eprintln!("nsql: note: couldn't save the password for resume: {e:#}");
                     }
@@ -474,7 +477,7 @@ fn run_subcommand(
                 embedded_pw
             };
             if let Some(pw) = pw {
-                match creds::pg_identity(&profile.url).map(|id| creds::identity_key(&id)) {
+                match creds::identity(&profile.url).map(|id| creds::identity_key(&id)) {
                     Some(key) => {
                         secrets::set(&key, &pw)?;
                         println!("stored password for `{key}` in the OS keyring");
