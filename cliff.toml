@@ -24,7 +24,7 @@ filter_unconventional = false
 protect_breaking_commits = false
 tag_pattern = "v[0-9]*"
 commit_preprocessors = [
-  { pattern = '^imprvments$', replace = "embed editor: module split, on-demand schema completion, visual-mode run, history ring + Ctrl-R" },
+  { pattern = '^imprvments$', replace = "assorted improvements (see the commit diff)" },
 ]
 commit_parsers = [
   { message = "^release:", skip = true },
