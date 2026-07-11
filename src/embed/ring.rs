@@ -140,7 +140,11 @@ mod tests {
                 .expect("setup lua");
 
             feed(&nvim, ",n").await;
-            assert_eq!(buf_text(&nvim).await, "-- live", "no history: ,n is a no-op");
+            assert_eq!(
+                buf_text(&nvim).await,
+                "-- live",
+                "no history: ,n is a no-op"
+            );
 
             let entries = Value::Array(vec![
                 Value::from("select 9 as newest"),
