@@ -7,8 +7,11 @@ header = """
 # Changelog
 
 """
+# The version heading doubles as the GitHub release title (cargo-dist lifts
+# it verbatim), so it stays bare; the date lives on its own line below.
 body = """
-## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+## [{{ version | trim_start_matches(pat="v") }}]
+_{{ timestamp | date(format="%Y-%m-%d") }}_
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 {% for commit in commits %}\
