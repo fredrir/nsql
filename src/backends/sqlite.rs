@@ -31,7 +31,7 @@ pub fn run_on(
     opts: &RunOpts,
 ) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
-    for stmt_text in sql::split_statements(sql_text, Dialect::default()) {
+    for stmt_text in sql::split_statements(sql_text, Dialect::for_scheme("sqlite")) {
         results.push(run_one(conn, &stmt_text, opts.cap)?);
     }
     Ok(results)

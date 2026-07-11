@@ -115,7 +115,7 @@ fn prompt(profile: &Profile, fresh: bool, is_tty: bool) {
 }
 
 fn complete(buf: &str, dialect: Dialect) -> bool {
-    !sql::split_statements(buf, dialect).is_empty() && buf.trim_end().ends_with(';')
+    !sql::split_statements(buf, dialect).is_empty() && sql::batch_complete(buf, dialect)
 }
 
 fn execute(

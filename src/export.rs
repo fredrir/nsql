@@ -135,10 +135,33 @@ fn write_buffered(
     fmt: ExportFormat,
     null_glyph: &str,
 ) -> Result<()> {
+    // One valid document per file: JSON gets a single array across every
+    // row-returning result (a write-only run exports `[]`); CSV/TSV separate
+    // result sets with a blank line.
+    if fmt == ExportFormat::Json {
+        write!(w, "[")?;
+        let mut first = true;
+        for result in results {
+            if let QueryResult::Rows { columns, rows, .. } = result {
+                for row in rows {
+                    write_row(w, columns, row, fmt, null_glyph, first)?;
+                    first = false;
+                }
+            }
+        }
+        write_footer(w, fmt, first)?;
+        return Ok(());
+    }
+
+    let mut first_set = true;
     for result in results {
         let QueryResult::Rows { columns, rows, .. } = result else {
             continue;
         };
+        if !first_set && matches!(fmt, ExportFormat::Csv | ExportFormat::Tsv) {
+            writeln!(w)?;
+        }
+        first_set = false;
         write_header(w, columns, fmt)?;
         let mut first = true;
         for row in rows {

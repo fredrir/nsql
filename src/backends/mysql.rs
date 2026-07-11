@@ -75,80 +75,89 @@ fn resolve_password(profile: &Profile) -> Option<String> {
 }
 
 pub fn run_on(conn: &mut MyConn, sql_text: &str, opts: &RunOpts) -> Result<Vec<QueryResult>> {
-    let dialect = Dialect {
-        backslash_strings: true,
-    };
+    let dialect = Dialect::for_scheme("mysql");
     let mut results = Vec::new();
     for stmt in sql::split_statements(sql_text, dialect) {
-        results.push(run_one(&mut conn.conn, &stmt, opts.cap)?);
+        run_one(&mut conn.conn, &stmt, opts.cap, &mut results)?;
     }
     Ok(results)
 }
 
-fn run_one(conn: &mut mysql::Conn, stmt: &str, cap: usize) -> Result<QueryResult> {
+/// A single statement can still yield several result sets (CALL of a stored
+/// procedure) — collect them all instead of silently dropping the tail.
+fn run_one(
+    conn: &mut mysql::Conn,
+    stmt: &str,
+    cap: usize,
+    results: &mut Vec<QueryResult>,
+) -> Result<()> {
     let mut qr = conn
         .query_iter(stmt)
         .with_context(|| format!("executing `{}`", preview(stmt)))?;
 
-    let columns: Vec<String> = qr
-        .columns()
-        .as_ref()
-        .iter()
-        .map(|c| c.name_str().into_owned())
-        .collect();
+    while let Some(rs) = qr.iter() {
+        let columns: Vec<String> = rs
+            .columns()
+            .as_ref()
+            .iter()
+            .map(|c| c.name_str().into_owned())
+            .collect();
 
-    if columns.is_empty() {
-        return Ok(QueryResult::Affected {
-            changes: qr.affected_rows() as usize,
+        if columns.is_empty() {
+            results.push(QueryResult::Affected {
+                changes: rs.affected_rows() as usize,
+            });
+            continue;
+        }
+
+        let mut rows: Vec<Vec<Cell>> = Vec::new();
+        let mut truncated = None;
+        for row in rs {
+            let row = row.context("reading row")?;
+            if rows.len() >= cap {
+                if truncated.is_none() {
+                    truncated = Some(rows.len());
+                }
+                continue; // drain the result set
+            }
+            let mut cells = Vec::with_capacity(row.len());
+            for i in 0..row.len() {
+                cells.push(match row.as_ref(i) {
+                    None | Some(mysql::Value::NULL) => Cell::Null,
+                    Some(mysql::Value::Bytes(b)) => match std::str::from_utf8(b) {
+                        Ok(s) => Cell::Text(s.to_string()),
+                        Err(_) => Cell::Bytes(b.clone()),
+                    },
+                    Some(mysql::Value::Int(i)) => Cell::Int(*i),
+                    Some(mysql::Value::UInt(u)) => i64::try_from(*u)
+                        .map(Cell::Int)
+                        .unwrap_or(Cell::Text(u.to_string())),
+                    Some(mysql::Value::Float(f)) => Cell::Real(*f as f64),
+                    Some(mysql::Value::Double(d)) => Cell::Real(*d),
+                    Some(mysql::Value::Date(y, mo, d, h, mi, s, us)) => {
+                        Cell::Text(if *h == 0 && *mi == 0 && *s == 0 && *us == 0 {
+                            format!("{y:04}-{mo:02}-{d:02}")
+                        } else {
+                            format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}")
+                        })
+                    }
+                    Some(mysql::Value::Time(neg, d, h, mi, s, us)) => {
+                        let sign = if *neg { "-" } else { "" };
+                        let hours = *d * 24 + u32::from(*h);
+                        Cell::Text(format!("{sign}{hours:02}:{mi:02}:{s:02}.{us:06}"))
+                    }
+                });
+            }
+            rows.push(cells);
+        }
+
+        results.push(QueryResult::Rows {
+            columns,
+            rows,
+            truncated,
         });
     }
-
-    let mut rows: Vec<Vec<Cell>> = Vec::new();
-    let mut truncated = None;
-    for row in qr.by_ref() {
-        let row = row.context("reading row")?;
-        if rows.len() >= cap {
-            if truncated.is_none() {
-                truncated = Some(rows.len());
-            }
-            continue; // drain the result set
-        }
-        let mut cells = Vec::with_capacity(row.len());
-        for i in 0..row.len() {
-            cells.push(match row.as_ref(i) {
-                None | Some(mysql::Value::NULL) => Cell::Null,
-                Some(mysql::Value::Bytes(b)) => match std::str::from_utf8(b) {
-                    Ok(s) => Cell::Text(s.to_string()),
-                    Err(_) => Cell::Bytes(b.clone()),
-                },
-                Some(mysql::Value::Int(i)) => Cell::Int(*i),
-                Some(mysql::Value::UInt(u)) => i64::try_from(*u)
-                    .map(Cell::Int)
-                    .unwrap_or(Cell::Text(u.to_string())),
-                Some(mysql::Value::Float(f)) => Cell::Real(*f as f64),
-                Some(mysql::Value::Double(d)) => Cell::Real(*d),
-                Some(mysql::Value::Date(y, mo, d, h, mi, s, us)) => {
-                    Cell::Text(if *h == 0 && *mi == 0 && *s == 0 && *us == 0 {
-                        format!("{y:04}-{mo:02}-{d:02}")
-                    } else {
-                        format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}")
-                    })
-                }
-                Some(mysql::Value::Time(neg, d, h, mi, s, us)) => {
-                    let sign = if *neg { "-" } else { "" };
-                    let hours = *d * 24 + u32::from(*h);
-                    Cell::Text(format!("{sign}{hours:02}:{mi:02}:{s:02}.{us:06}"))
-                }
-            });
-        }
-        rows.push(cells);
-    }
-
-    Ok(QueryResult::Rows {
-        columns,
-        rows,
-        truncated,
-    })
+    Ok(())
 }
 
 fn preview(s: &str) -> String {

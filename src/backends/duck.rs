@@ -43,7 +43,7 @@ impl DuckConn {
 
 pub fn run_on(conn: &mut DuckConn, sql_text: &str, opts: &RunOpts) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
-    for stmt_text in sql::split_statements(sql_text, Dialect::default()) {
+    for stmt_text in sql::split_statements(sql_text, Dialect::for_scheme("duckdb")) {
         results.push(run_one(&conn.conn, &stmt_text, opts.cap)?);
     }
     Ok(results)

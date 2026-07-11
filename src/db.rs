@@ -69,10 +69,9 @@ pub enum Conn {
 impl Conn {
     pub fn dialect(&self) -> Dialect {
         match self {
+            Conn::Sqlite(_) => Dialect::for_scheme("sqlite"),
             #[cfg(feature = "mysql-backend")]
-            Conn::MySql(_) => Dialect {
-                backslash_strings: true,
-            },
+            Conn::MySql(_) => Dialect::for_scheme("mysql"),
             _ => Dialect::default(),
         }
     }
@@ -237,8 +236,10 @@ pub fn guard(profile: &Profile, sql_text: &str, assume_yes: bool, is_tty: bool) 
             }
         }
 
-        if destructive_kw.is_none() && DESTRUCTIVE.contains(&kw.as_str()) {
-            destructive_kw = Some(kw);
+        if destructive_kw.is_none() {
+            destructive_kw = sql::keywords(stmt, dialect)
+                .into_iter()
+                .find(|k| DESTRUCTIVE.contains(&k.as_str()));
         }
     }
 
@@ -337,6 +338,25 @@ mod tests {
         assert!(guard(&p(true, false), "drop table t", false, false).is_err());
         assert!(guard(&p(true, false), "drop table t", true, false).is_ok());
         assert!(guard(&p(true, false), "select 1", false, false).is_ok());
+    }
+
+    #[test]
+    fn prod_catches_cte_and_explain_hidden_writes() {
+        assert!(guard(
+            &p(true, false),
+            "with x as (delete from users returning *) select * from x",
+            false,
+            false
+        )
+        .is_err());
+        assert!(guard(
+            &p(true, false),
+            "explain analyze delete from t",
+            false,
+            false
+        )
+        .is_err());
+        assert!(guard(&p(true, false), "select \"drop\" from t", false, false).is_ok());
     }
 
     #[test]

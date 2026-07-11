@@ -7,17 +7,37 @@
 //! comments, `E'…'` backslash escapes, and MySQL backslash strings are all
 //! handled at this level.
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dialect {
     /// MySQL treats backslash as an escape in ordinary strings; Postgres and
     /// SQLite only do so in `E'…'` strings.
     pub backslash_strings: bool,
+    /// $tag$…$tag$ quoting exists in Postgres/DuckDB only; treating it as a
+    /// string in MySQL/SQLite would swallow semicolons after a bare `$word$`.
+    pub dollar_strings: bool,
 }
 
 impl Dialect {
     pub fn for_scheme(scheme: &str) -> Self {
+        match scheme {
+            "mysql" | "mariadb" => Dialect {
+                backslash_strings: true,
+                dollar_strings: false,
+            },
+            "sqlite" => Dialect {
+                backslash_strings: false,
+                dollar_strings: false,
+            },
+            _ => Dialect::default(),
+        }
+    }
+}
+
+impl Default for Dialect {
+    fn default() -> Self {
         Dialect {
-            backslash_strings: matches!(scheme, "mysql" | "mariadb"),
+            backslash_strings: false,
+            dollar_strings: true,
         }
     }
 }
@@ -109,7 +129,7 @@ pub fn scan(sql: &str, dialect: Dialect) -> Vec<Span<'_>> {
                 i = end;
                 start = i;
             }
-            b'$' => {
+            b'$' if dialect.dollar_strings => {
                 if let Some(tag_end) = dollar_tag(b, i) {
                     push(&mut spans, sql, Kind::Code, start, i);
                     let tag = &sql[i..tag_end];
@@ -366,6 +386,40 @@ pub fn find_params(sql: &str, dialect: Dialect) -> Vec<ParamRef> {
     params
 }
 
+/// True when `buf` reads as a finished statement batch: no unterminated
+/// quote/dollar-string at the end, and the last code character is `;`.
+/// Trailing comments after the `;` are fine.
+pub fn batch_complete(buf: &str, dialect: Dialect) -> bool {
+    let spans = scan(buf, dialect);
+    if let Some(last) = spans.last() {
+        let t = last.text;
+        let open = match last.kind {
+            Kind::Str => !(t.len() >= 2 && t.ends_with('\'')),
+            Kind::Ident => {
+                let q = t.chars().next().unwrap_or('"');
+                !(t.len() >= 2 && t.ends_with(q))
+            }
+            Kind::DollarStr => {
+                let tag_len = t[1..].find('$').map(|p| p + 2).unwrap_or(t.len());
+                !(t.len() >= 2 * tag_len && t.ends_with(&t[..tag_len]))
+            }
+            _ => false,
+        };
+        if open {
+            return false;
+        }
+    }
+    let mut last_code_char = None;
+    for span in &spans {
+        if span.kind == Kind::Code {
+            if let Some(c) = span.text.trim_end().chars().last() {
+                last_code_char = Some(c);
+            }
+        }
+    }
+    last_code_char == Some(';')
+}
+
 /// Quote a string as a SQL literal ('' doubling).
 pub fn quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -427,6 +481,30 @@ mod tests {
     }
 
     #[test]
+    fn dollar_quoting_is_postgres_only() {
+        let lite = Dialect::for_scheme("sqlite");
+        let v = split_statements("select 1 as a$x$; select 2 as b", lite);
+        assert_eq!(v.len(), 2, "sqlite must not treat $x$ as a string opener");
+        let my = Dialect::for_scheme("mysql");
+        let v = split_statements("select 1 as a$x$; select 2 as b", my);
+        assert_eq!(v.len(), 2);
+        let pg_d = Dialect::for_scheme("postgres");
+        let v = split_statements("select $x$ a; b $x$; select 2", pg_d);
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn batch_completeness_is_string_aware() {
+        let d = Dialect::default();
+        assert!(batch_complete("select 1;", d));
+        assert!(batch_complete("select 1; -- trailing comment", d));
+        assert!(!batch_complete("select 1", d));
+        assert!(!batch_complete("insert into t values (';", d));
+        assert!(!batch_complete("select $tag$ open;", d));
+        assert!(batch_complete("select 'a;b';", d));
+    }
+
+    #[test]
     fn escaped_strings() {
         // E'..' with a backslash-escaped quote
         let v = split_statements(r"select E'it\'s'; select 2", pg());
@@ -436,9 +514,7 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert_eq!(v[0], r"select 'c:\'");
         // mysql dialect: backslash IS an escape
-        let my = Dialect {
-            backslash_strings: true,
-        };
+        let my = Dialect::for_scheme("mysql");
         let v = split_statements(r"select 'it\'s a; test'; select 2", my);
         assert_eq!(v.len(), 2);
     }

@@ -43,7 +43,10 @@ struct SslParams {
 }
 
 fn extract_ssl_params(url: &str) -> (String, SslParams) {
-    let Some((base, query)) = url.split_once('?') else {
+    // Anchor past the userinfo so a raw `?` in a password can't be mistaken
+    // for the query-string separator.
+    let anchor = url.rfind('@').map(|i| i + 1).unwrap_or(0);
+    let Some(q) = url[anchor..].find('?').map(|p| anchor + p) else {
         return (
             url.to_string(),
             SslParams {
@@ -52,6 +55,7 @@ fn extract_ssl_params(url: &str) -> (String, SslParams) {
             },
         );
     };
+    let (base, query) = (&url[..q], &url[q + 1..]);
     let mut mode = None;
     let mut rootcert = None;
     let mut kept: Vec<&str> = Vec::new();
@@ -384,6 +388,10 @@ fn numeric_fixup(cell: Cell, was_numeric: bool) -> Cell {
     }
 }
 
+// Temporal types deliberately go through the ::text cast wrapper instead of
+// binary chrono decoding: values like 'infinity'::timestamp have no chrono
+// representation, and a mid-row decode failure would re-run the whole query
+// via the text protocol (double-executing volatile functions).
 fn type_supported(ty: &postgres::types::Type) -> bool {
     use postgres::types::Type;
     matches!(
@@ -403,10 +411,6 @@ fn type_supported(ty: &postgres::types::Type) -> bool {
             | Type::JSON
             | Type::JSONB
             | Type::BYTEA
-            | Type::TIMESTAMP
-            | Type::TIMESTAMPTZ
-            | Type::DATE
-            | Type::TIME
     )
 }
 
@@ -434,14 +438,6 @@ fn typed_cell(row: &postgres::Row, i: usize, ty: &postgres::types::Type) -> Opti
         }
         Type::JSON | Type::JSONB => get!(serde_json::Value, Cell::Json),
         Type::BYTEA => get!(Vec<u8>, Cell::Bytes),
-        Type::TIMESTAMP => get!(chrono::NaiveDateTime, |v| Cell::Text(
-            v.format("%Y-%m-%d %H:%M:%S%.f").to_string()
-        )),
-        Type::TIMESTAMPTZ => get!(chrono::DateTime<chrono::Utc>, |v| Cell::Text(
-            v.to_rfc3339()
-        )),
-        Type::DATE => get!(chrono::NaiveDate, |v| Cell::Text(v.to_string())),
-        Type::TIME => get!(chrono::NaiveTime, |v| Cell::Text(v.to_string())),
         _ => None,
     }
 }
@@ -462,6 +458,13 @@ mod tests {
         let (clean, ssl) = extract_ssl_params("postgres://u@h/db");
         assert_eq!(clean, "postgres://u@h/db");
         assert!(ssl.mode.is_none());
+    }
+
+    #[test]
+    fn question_mark_in_password_does_not_eat_sslmode() {
+        let (clean, ssl) = extract_ssl_params("postgres://u:p?ss@h/db?sslmode=verify-full");
+        assert_eq!(clean, "postgres://u:p?ss@h/db");
+        assert_eq!(ssl.mode.as_deref(), Some("verify-full"));
     }
 
     #[test]
