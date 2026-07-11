@@ -50,6 +50,28 @@ pub fn last_for(paths: &Paths, profile: &str) -> Result<Option<String>> {
     })
 }
 
+/// The most recent distinct SQL entries for a profile, newest first
+/// (consecutive duplicates collapsed).
+pub fn recent_for(paths: &Paths, profile: &str, limit: usize) -> Result<Vec<String>> {
+    if !paths.history_db.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = open(paths)?;
+    let mut stmt = conn.prepare("SELECT sql FROM history WHERE profile = ?1 ORDER BY id DESC")?;
+    let rows = stmt.query_map([profile], |r| r.get::<_, String>(0))?;
+    let mut out: Vec<String> = Vec::new();
+    for row in rows {
+        let sql = row?;
+        if out.last() != Some(&sql) {
+            out.push(sql);
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 pub fn list(paths: &Paths, limit: usize) -> Result<()> {
     if !paths.history_db.exists() {
         println!("(no history yet)");
@@ -72,4 +94,48 @@ pub fn list(paths: &Paths, limit: usize) -> Result<()> {
         println!("{ts}  [{profile}]  {preview}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths(dir: &std::path::Path) -> Paths {
+        Paths {
+            config_file: dir.join("config.toml"),
+            state_dir: dir.join("state"),
+            favorites_dir: dir.join("favorites"),
+            history_db: dir.join("history.sqlite"),
+            inject_lua: dir.join("inject.lua"),
+            default_db: dir.join("dev.db"),
+            recents_file: dir.join("recents.toml"),
+        }
+    }
+
+    #[test]
+    fn recent_for_dedups_consecutive_newest_first() {
+        let dir = std::env::temp_dir().join(format!("nsql-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = test_paths(&dir);
+        let _ = std::fs::remove_file(&paths.history_db);
+
+        assert!(
+            recent_for(&paths, "p", 9).unwrap().is_empty(),
+            "no history file must mean no entries, not an error"
+        );
+
+        for sql in ["select 1", "select 2", "select 2", "select 1", "select 3"] {
+            record(&paths, "p", sql).unwrap();
+        }
+        record(&paths, "other", "select 99").unwrap();
+
+        let got = recent_for(&paths, "p", 9).unwrap();
+        assert_eq!(got, vec!["select 3", "select 1", "select 2", "select 1"]);
+
+        let capped = recent_for(&paths, "p", 2).unwrap();
+        assert_eq!(capped, vec!["select 3", "select 1"]);
+
+        let _ = std::fs::remove_file(&paths.history_db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

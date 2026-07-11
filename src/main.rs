@@ -55,7 +55,13 @@ fn real_main() -> Result<()> {
     let mut cfg = Config::load_or_init(&paths)?;
 
     if let Some(cmd) = cli.command {
-        return run_subcommand(cmd, &paths, &mut cfg, profile_override.as_deref());
+        return run_subcommand(
+            cmd,
+            &paths,
+            &mut cfg,
+            profile_override.as_deref(),
+            target.as_deref(),
+        );
     }
 
     if !cli.params.is_empty() && cli.favorite.is_none() {
@@ -391,6 +397,7 @@ fn run_subcommand(
     paths: &Paths,
     cfg: &mut Config,
     profile_override: Option<&str>,
+    target: Option<&str>,
 ) -> Result<()> {
     match cmd {
         Commands::Profiles => {
@@ -514,6 +521,7 @@ fn run_subcommand(
             cfg,
             paths,
             profile_override,
+            target,
             &introspect::Verb::Tables {
                 schema: schema.as_deref(),
             },
@@ -522,11 +530,16 @@ fn run_subcommand(
             cfg,
             paths,
             profile_override,
+            target,
             &introspect::Verb::Describe { name: &name },
         ),
-        Commands::Schemas => {
-            introspect_command(cfg, paths, profile_override, &introspect::Verb::Schemas)
-        }
+        Commands::Schemas => introspect_command(
+            cfg,
+            paths,
+            profile_override,
+            target,
+            &introspect::Verb::Schemas,
+        ),
 
         Commands::Completions { shell } => {
             use clap::CommandFactory;
@@ -548,13 +561,28 @@ fn introspect_command(
     cfg: &Config,
     paths: &Paths,
     profile_override: Option<&str>,
+    target: Option<&str>,
     verb: &introspect::Verb,
 ) -> Result<()> {
-    let profile = match profile_override {
-        Some(_) => cfg.select(profile_override)?,
-        None => match recents::most_recent(paths) {
-            Some(r) => r.to_profile(cfg),
-            None => cfg.select(None)?,
+    let profile = match target {
+        Some(t) if is_db_url(t) => Profile {
+            name: adhoc_name(t),
+            url: t.to_string(),
+            prod: false,
+            readonly: false,
+            no_history: false,
+            ssh: None,
+        },
+        Some(t) => recents::resolve(paths, t)
+            .map(|r| r.to_profile(cfg))
+            .or_else(|| cfg.profiles.iter().find(|p| p.name == t).cloned())
+            .with_context(|| format!("unknown connection `{t}`"))?,
+        None => match profile_override {
+            Some(_) => cfg.select(profile_override)?,
+            None => match recents::most_recent(paths) {
+                Some(r) => r.to_profile(cfg),
+                None => cfg.select(None)?,
+            },
         },
     };
     let q = introspect::query(&profile, verb)?;
