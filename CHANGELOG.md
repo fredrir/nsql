@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.10] - 2026-07-11
+
+### Changed
+- deps: rusqlite 0.40, mysql 28, toml 1, directories 6, checkout v7
+
 ## [0.1.9] - 2026-07-11
 
 ### Changed
