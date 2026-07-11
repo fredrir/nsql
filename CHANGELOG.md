@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.9] - 2026-07-11
+
+### Changed
+- cliff: generic remap (two identical imprvments commits exist)
+
 ## [0.1.8] - 2026-07-11
 
 ### Fixed
@@ -8,7 +13,7 @@
 ## [0.1.7] - 2026-07-11
 
 ### Changed
-- embed editor: module split, on-demand schema completion, visual-mode run, history ring + Ctrl-R
+- assorted improvements (see the commit diff)
 
 ## [0.1.6] - 2026-07-11
 
@@ -27,7 +32,7 @@
 
 
 ### Changed
-- embed editor: module split, on-demand schema completion, visual-mode run, history ring + Ctrl-R
+- assorted improvements (see the commit diff)
 
 
 ### Internal
