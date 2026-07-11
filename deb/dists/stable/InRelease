@@ -5,35 +5,35 @@ Origin: nsql
 Label: nsql
 Suite: stable
 Codename: stable
-Date: Sat, 11 Jul 2026 19:29:18 UTC
+Date: Sat, 11 Jul 2026 19:39:42 UTC
 Architectures: amd64
 Components: main
 Description: nsql apt repository — https://github.com/fredrir/nsql
 MD5Sum:
- d8213c89030fcc1028d47184dc26726a 889 main/binary-amd64/Packages
- 57dfd0263a0a50b34c0c3f2a5341d814 580 main/binary-amd64/Packages.gz
+ a11412fa5937b35d6f9db83bef588039 889 main/binary-amd64/Packages
+ db6bcf790983130ac04c2edcc0af5534 579 main/binary-amd64/Packages.gz
  dae5e2d66ea8763f6f7f761b48d8a71b 146 main/binary-amd64/Release
 SHA1:
- 09c7ef75794d0108230efb75966bfa8574ec5cde 889 main/binary-amd64/Packages
- 872bddb8a6a2451eca037676bd7db0177fa19ab6 580 main/binary-amd64/Packages.gz
+ 66ffdfffdfc66fc192e5e468dd7d4355a61c2356 889 main/binary-amd64/Packages
+ 47acca1622929ea63e836c3afb0c104ac6279c69 579 main/binary-amd64/Packages.gz
  edcf5d9f78ebeff221cccbb0f16559ed028e64a3 146 main/binary-amd64/Release
 SHA256:
- 396f8cb6952b94c79599610aa779ee74ce29c8702bfd43aa34c3c08312ab02ad 889 main/binary-amd64/Packages
- dd2d91a73e0a66ca1292b01381431971873ff83172f29bab6b1cda9e47e8f647 580 main/binary-amd64/Packages.gz
+ 486ae38cf7d4f6d540aa09cb17f219900d3d4d9a4694475abe3847367cda43bc 889 main/binary-amd64/Packages
+ fb8ffe952f4ba3561b541279112901b8269b8f04df558ec8a57baa91979e7afa 579 main/binary-amd64/Packages.gz
  ee1d8d9bde5bcaac5c4c1971da139411bfa0b0b9981103d2784ded0e71d3af6c 146 main/binary-amd64/Release
 -----BEGIN PGP SIGNATURE-----
 
-iQIzBAEBCgAdFiEE+hvdBLKequ201X5GesVE7jOfKuEFAmpSmY8ACgkQesVE7jOf
-KuEU0Q//VPYIsJL1Y49AFdxpoqcoIsGr7+3xvfW/ESQQsY2FXfqM41XL6qkbZQtn
-hpp6giOzF+7SFVK/wbKPlimgHwR378KZnmyHveQHsJI1+SzzaCPLCb4tTjvTR15G
-nQxHHtDsYGd1aVwdUpFeHy6s0GLcOVzcoQWaRhilTSztnWYCWgNVnfg+YQYHoDjK
-WG2sBPc/IJtWacWFno8tND/Uw+xIQykmIF/NswHzJ7m1nSCXvYBz0nGyK5BCAoS2
-n8TW7E3s/I1/QkeHX+FbP4itQTFf9W4rgg9jchhI/y+gOdl5Wsc0hjGHnLGpOk6m
-hXvzuWpenkkWprXfM/SvJ3iakTf74DDuNYDT6gkqbNIfAfpRgQwkHVBZ3k7S4fXr
-7avhpz4e6iAmXIMZLpLeJdKxa1OkAS1LLrqEb7NrjCwD+lWaz/QqJSf9I1nQkkAC
-fzYpv7BenLn4wy76HXXa4wyqhi5x/mGAE6Oo3lqorylwe26wnJ//CwZraliyHy5N
-Mj7JUwJ13cjkc7CgHryFVgSSL9daFBqLayCS8W2wTnA1DtsuFJhiQ71ms9k4Rp4S
-LAFAKRW4Y0i8pfEYw3a+HqZn0Hg9bkzuf4ZBSfoupfN4rNDSv35SkcgwbUL7up2R
-rpiBt43qIvo5WqxUDzE7zIEpoP4XmgdzrCWAONirCS4DwSsYz30=
-=8XUo
+iQIzBAEBCgAdFiEE+hvdBLKequ201X5GesVE7jOfKuEFAmpSm/8ACgkQesVE7jOf
+KuG38Q/+KtH3942hx96a63DY0XWCYFILfsf1mzjOR8Lh1dJc8Z+ZkRW81OeUXWIo
+oP7jm387DgJ7U0xR2zXzbN0Zd8LVzohtNVGPAp/DlT9Z/moWiqROYFVZhmxHxZ8h
+e8hlgXVP41qMrWgMuLattIirxFjrrq1W8AfUrcfgoAzvSOvbYzXll4tWjFz/TSPI
+4cwGcg0+gyJ5vba80bvEi9pD2nPg2ujY09BRrhsoL1FfA3VuPBMeq1ZrnHNBexiA
+0IWkNeExwFCOaErgzWwtMAyh6knMRkICdKnn87uwRTVB97JqC2hTY1LDBAOJAu6S
+ZT2cKrqhFW5Ulsz8XTsBtkNsMP4OQhXLSWl1MId2FnmpGGGrRHvpkN2CaVAruwyu
+crSAL+xXAhajRtcYIhzuXHZbGgvN9iHi8CFDc3ddonUKiEbf4oeSRqlKU0vqPVVa
+cTTAsSYQ+B5S79y170Lu6o9vWS0mLNYOoaxXTAWgCZIeVXILSABa99GfSjthEQxR
+opl93vERton3kYbaJdMwgbttHrhmTz/5EjLqtH94+XAvPo3QAgU2ekjNVahjIRGl
+lgtAO2ZW/ht3E1KtbiGk+DbtCFjy63dZWJjHE53lBYJ0HT1VvqsQI+nzTXWsxb2y
+FWuFdgl/HbXgMUx1ovciIOUk/ua+1h12cdVnPaGtvBBEgGB9TSI=
+=9cg8
 -----END PGP SIGNATURE-----
