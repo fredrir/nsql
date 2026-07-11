@@ -54,6 +54,10 @@ jobs:
             fi
           fi
           echo "next=$next" >> "$GITHUB_OUTPUT"
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
       - run: |
           set -euo pipefail
           next='${{ steps.v.outputs.next }}'
@@ -64,10 +68,13 @@ jobs:
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$next\"/" Cargo.toml
           awk -v ver="$next" 'BEGIN{f=0} /^name = "nsql"$/{f=1} f && /^version = /{sub(/"[^"]*"/,"\"" ver "\"");f=0} {print}' Cargo.lock > Cargo.lock.new
           mv -f Cargo.lock.new Cargo.lock
+          git-cliff --tag "v$next" -o CHANGELOG.md \
+            || echo "::warning::git-cliff failed; release notes fall back to the auto-generated body"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet; then
-            git commit -am "release: v$next"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "release: v$next"
             git push origin HEAD:main
           fi
           git tag -a "v$next" -m "v$next"

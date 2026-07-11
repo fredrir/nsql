@@ -1,0 +1,32 @@
+# git-cliff configuration. auto-release regenerates CHANGELOG.md with
+# `git-cliff --tag vX.Y.Z -o CHANGELOG.md` before tagging; cargo-dist then
+# lifts the matching section into the GitHub release notes.
+
+[changelog]
+header = """
+# Changelog
+
+"""
+body = """
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}\
+- {{ commit.message | split(pat="\n") | first | trim }}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+protect_breaking_commits = false
+tag_pattern = "v[0-9]*"
+commit_parsers = [
+  { message = "^release:", skip = true },
+  { message = "^(feat|core|add)", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^(chore|ci|docs|build|test)", group = "Internal" },
+  { message = ".*", group = "Changed" },
+]
