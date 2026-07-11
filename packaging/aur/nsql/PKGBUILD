@@ -9,6 +9,9 @@ pkgdesc="Run SQL from your terminal, composed in your real Neovim — without ta
 arch=('x86_64' 'aarch64')
 url="https://github.com/fredrir/nsql"
 license=('0BSD')
+# makepkg's -flto=auto compiles the bundled sqlite3.c to GCC-LTO bitcode,
+# which rust-lld cannot read (undefined sqlite3_* at link time).
+options=('!lto')
 depends=('dbus' 'gcc-libs')
 makedepends=('cargo')
 optdepends=('neovim: inline/embedded SQL editor (falls back to vim/vi/$EDITOR otherwise)')

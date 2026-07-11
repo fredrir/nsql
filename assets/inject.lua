@@ -337,16 +337,26 @@ pcall(function()
   end
 
   vim.keymap.set("n", ",h", function()
-    float("nsql · keys", {
+    local lines = {
       "  :w            run the statement under the cursor (:wq runs + quits)",
       "  q             toggle between the editor and the results window",
       "  <C-x><C-o>    schema-aware completion (tables & columns)",
       "  ,a            run uncapped (all rows)",
       "  ,R            run on a prod profile (force past the guard)",
       "  ,j  /  ,c     copy the last result as JSON / CSV",
+    }
+    if vim.g.nsql_chan then
+      vim.list_extend(lines, {
+        "  ,, (visual)   run only the selected SQL",
+        "  ,n  /  ,p     cycle recent queries (9-slot history ring)",
+        "  <C-r>         pick from query history",
+      })
+    end
+    vim.list_extend(lines, {
       "  ,h  /  ,i     this help  /  connection info",
       "  :q :wq :q! ZZ quit (your buffer is saved for next time)",
     })
+    float("nsql · keys", lines)
   end, o)
 
   vim.keymap.set("n", ",i", function()

@@ -80,9 +80,10 @@ recommends = "neovim"
 license-file = ["LICENSE", "0"]
 extended-description = """\
 nsql runs SQL from your terminal, composed in your real Neovim, without taking \
-over the screen or destroying scrollback. Supports SQLite and PostgreSQL, with \
-schema-aware completion and OS-keychain credential storage."""
+over the screen or destroying scrollback. Supports SQLite, PostgreSQL, and \
+MySQL/MariaDB, with schema-aware completion and OS-keychain credential storage."""
 assets = [
     ["target/release/nsql", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/nsql/README.md", "644"],
+    ["THIRD-PARTY-LICENSES.md", "usr/share/doc/nsql/THIRD-PARTY-LICENSES.md", "644"],
 ]

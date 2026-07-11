@@ -23,6 +23,9 @@ conventional_commits = false
 filter_unconventional = false
 protect_breaking_commits = false
 tag_pattern = "v[0-9]*"
+commit_preprocessors = [
+  { pattern = '^imprvments$', replace = "embed editor: module split, on-demand schema completion, visual-mode run, history ring + Ctrl-R" },
+]
 commit_parsers = [
   { message = "^release:", skip = true },
   { message = "^(feat|core|add)", group = "Added" },
