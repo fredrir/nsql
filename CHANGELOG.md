@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.7] - 2026-07-11
+
+### Changed
+- embed editor: module split, on-demand schema completion, visual-mode run, history ring + Ctrl-R
+
 ## [0.1.6] - 2026-07-11
 
 ### Fixed
