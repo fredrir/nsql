@@ -40,7 +40,7 @@ native-tls = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ctrlc = "3"
 clap_complete = "4"
-mysql = { version = "26", optional = true }
+mysql = { version = "28", optional = true }
 duckdb = { version = "1", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: JSON output keeps query column order; arbitrary_precision:
