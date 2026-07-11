@@ -33,7 +33,7 @@ embed-editor = ["dep:nvim-rs", "dep:tokio", "dep:ratatui", "dep:async-trait"]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 comfy-table = "7"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1"] }
 postgres-native-tls = "0.5"
 native-tls = "0.2"
