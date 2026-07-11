@@ -1,6 +1,6 @@
 [package]
 name = "nsql"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 # Floor set by rusqlite 0.40 / libsqlite3-sys 0.38 (cfg_select! in build.rs).
 rust-version = "1.95"
