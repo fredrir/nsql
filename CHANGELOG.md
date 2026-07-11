@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.8] - 2026-07-11
+
+### Fixed
+- fix review findings: prod guard deep scan, export framing, dialect gaps
+
 ## [0.1.7] - 2026-07-11
 
 ### Changed
