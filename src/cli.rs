@@ -23,9 +23,22 @@ pub struct Cli {
     #[arg(short = 'F', long = "favorite", value_name = "NAME")]
     pub favorite: Option<String>,
 
+    /// Bind a favorite parameter, e.g. -P id=42 (repeatable). Favorites use
+    /// :name (raw: numbers/booleans), :'name' (string), :"name" (identifier).
+    #[arg(short = 'P', long = "param", value_name = "NAME=VALUE")]
+    pub params: Vec<String>,
+
+    /// Allow raw :name substitution of arbitrary strings (you own the quoting)
+    #[arg(long = "unsafe-subst")]
+    pub unsafe_subst: bool,
+
     /// Select connection profile (you can also pass a leading @name)
     #[arg(short = 'p', long = "profile", value_name = "NAME")]
     pub profile: Option<String>,
+
+    /// Re-open the editor on your most recent query for this profile
+    #[arg(long = "last")]
+    pub last: bool,
 
     /// Force the neovim compose loop even when reading from a pipe
     #[arg(long = "edit")]
@@ -53,16 +66,35 @@ pub struct Cli {
     #[arg(long = "json")]
     pub json: bool,
 
+    /// Glyph used to render NULL (default "(null)")
+    #[arg(long = "null", value_name = "GLYPH")]
+    pub null: Option<String>,
+
     /// Do not cap the number of rows rendered
     #[arg(long = "all")]
     pub all: bool,
+
+    /// Stream the full result to a file (never capped, never paged).
+    /// Format from --format or the file extension (.csv/.tsv/.json/.ndjson)
+    #[arg(long = "out", value_name = "PATH")]
+    pub out: Option<String>,
+
+    /// Re-run the query every N seconds until Ctrl-C (needs -e/-f/-F)
+    #[arg(long = "watch", value_name = "SECONDS")]
+    pub watch: Option<f64>,
+
+    /// Line-oriented session on one pinned connection (transactions work).
+    /// Meta-commands: \q quit, \e edit in $EDITOR, \d [table] describe, \g run
+    #[arg(long = "repeat")]
+    pub repeat: bool,
 
     /// Skip the confirmation for destructive statements on prod-tagged profiles
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
 
-    /// Read-only session: refuse anything but SELECT/EXPLAIN/… (great over SSH on a
-    /// server you want to be SURE you can't mutate). Shows a green SAFE badge.
+    /// Read-only session: refuse anything but SELECT/EXPLAIN/… and open the
+    /// connection read-only at the engine level (great over SSH on a server
+    /// you want to be SURE you can't mutate). Shows a green SAFE badge.
     #[arg(long = "safe")]
     pub safe: bool,
 
@@ -83,6 +115,9 @@ pub enum FormatArg {
     Tsv,
     Csv,
     Json,
+    Ndjson,
+    #[value(alias = "md")]
+    Markdown,
 }
 
 #[derive(Subcommand, Debug)]
@@ -104,6 +139,9 @@ pub enum Commands {
         /// Mark this profile read-only (refuse non-SELECT statements)
         #[arg(long)]
         readonly: bool,
+        /// Tunnel the connection through this SSH destination (user@bastion)
+        #[arg(long, value_name = "DEST")]
+        ssh: Option<String>,
     },
     /// Save the active profile's current scratch buffer as a named favorite (.sql)
     Save { name: String },
@@ -113,6 +151,21 @@ pub enum Commands {
     History {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// List tables (and views) in the connected database
+    Tables {
+        /// Restrict to one schema (postgres/mysql)
+        #[arg(long)]
+        schema: Option<String>,
+    },
+    /// Describe a table: columns, types, nullability
+    Describe { name: String },
+    /// List schemas/databases
+    Schemas,
+    /// Generate shell completions (bash/zsh/fish/elvish/powershell)
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
     /// Discover local databases (docker/podman) — Phase 2 (stub)
     Discover,

@@ -35,6 +35,21 @@ pub fn record(paths: &Paths, profile: &str, sql: &str) -> Result<()> {
     Ok(())
 }
 
+/// The most recent query recorded for a profile (used by --last).
+pub fn last_for(paths: &Paths, profile: &str) -> Result<Option<String>> {
+    if !paths.history_db.exists() {
+        return Ok(None);
+    }
+    let conn = open(paths)?;
+    let mut stmt =
+        conn.prepare("SELECT sql FROM history WHERE profile = ?1 ORDER BY id DESC LIMIT 1")?;
+    let mut rows = stmt.query([profile])?;
+    Ok(match rows.next()? {
+        Some(r) => Some(r.get::<_, String>(0)?),
+        None => None,
+    })
+}
+
 pub fn list(paths: &Paths, limit: usize) -> Result<()> {
     if !paths.history_db.exists() {
         println!("(no history yet)");

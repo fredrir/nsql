@@ -15,7 +15,11 @@ name = "nsql"
 path = "src/main.rs"
 
 [features]
-default = ["keyring-store", "embed-editor"]
+default = ["keyring-store", "embed-editor", "mysql-backend"]
+# MySQL/MariaDB support (one wire protocol covers both).
+mysql-backend = ["dep:mysql"]
+# DuckDB support. Opt-in: the bundled libduckdb C++ build is heavy.
+duckdb-backend = ["dep:duckdb"]
 # OS-keychain credential storage. Disable with --no-default-features if the
 # secret-service/zbus stack is unavailable or you want a leaner build.
 keyring-store = ["dep:keyring"]
@@ -29,9 +33,18 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 comfy-table = "7"
 rusqlite = { version = "0.32", features = ["bundled"] }
-postgres = "0.19"
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1"] }
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+ctrlc = "3"
+clap_complete = "4"
+mysql = { version = "26", optional = true }
+duckdb = { version = "1", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: JSON output keeps query column order; arbitrary_precision:
+# NUMERIC values survive --json without float rounding.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 toml = "0.8"
 directories = "5"
 terminal_size = "0.4"

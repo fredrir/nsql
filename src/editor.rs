@@ -31,6 +31,15 @@ pub fn compose(paths: &Paths, profile: &Profile, portable: bool) -> Result<Optio
         .env("NSQL_PROD", if profile.prod { "1" } else { "0" })
         .env("NSQL_SAFE", if profile.readonly { "1" } else { "0" })
         .env_remove("PGPASSWORD");
+    // Schema names for <C-x><C-k> / <C-n> completion — refreshed in the
+    // background, read lazily by vim at completion time.
+    crate::introspect::refresh_dictionary(paths, profile);
+    let dict = crate::introspect::dict_path(paths, &profile.name);
+    let dict_cmd = format!(
+        "setlocal dictionary+={} complete+=k",
+        dict.display().to_string().replace(' ', "\\ ")
+    );
+
     match kind {
         EditorKind::Nvim => {
             cmd.arg("-i").arg("NONE"); // disable shada (NOT `--cmd 'set shada=NONE'`, throws E539)
@@ -41,10 +50,16 @@ pub fn compose(paths: &Paths, profile: &Profile, portable: bool) -> Result<Optio
                 .arg("-c")
                 .arg("setfiletype sql")
                 .arg("-c")
+                .arg(&dict_cmd)
+                .arg("-c")
                 .arg(format!("luafile {}", paths.inject_lua.display()));
         }
         EditorKind::Vimlike => {
-            cmd.arg(&tmp).arg("-c").arg("setfiletype sql");
+            cmd.arg(&tmp)
+                .arg("-c")
+                .arg("setfiletype sql")
+                .arg("-c")
+                .arg(&dict_cmd);
         }
         EditorKind::Other => {
             cmd.arg(&tmp);

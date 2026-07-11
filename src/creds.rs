@@ -13,6 +13,10 @@ pub fn identity_key(id: &PgIdentity) -> String {
 }
 
 pub fn pg_identity(url: &str) -> Option<PgIdentity> {
+    url_identity(url, 5432)
+}
+
+pub fn url_identity(url: &str, default_port: u16) -> Option<PgIdentity> {
     let rest = url.split_once("://")?.1;
     let (authority, after) = rest.split_once('/').unwrap_or((rest, ""));
     let db = after.split(['?', '&']).next().unwrap_or("").to_string();
@@ -30,9 +34,9 @@ pub fn pg_identity(url: &str) -> Option<PgIdentity> {
 
     let (host, port) = match hostport.rsplit_once(':') {
         Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
-            (h.to_string(), p.parse().unwrap_or(5432))
+            (h.to_string(), p.parse().unwrap_or(default_port))
         }
-        _ => (hostport.to_string(), 5432u16),
+        _ => (hostport.to_string(), default_port),
     };
     if host.is_empty() {
         return None;

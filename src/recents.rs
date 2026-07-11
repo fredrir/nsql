@@ -33,6 +33,7 @@ impl Recent {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         }
     }
 }
@@ -111,6 +112,7 @@ mod tests {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         }
     }
 

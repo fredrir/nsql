@@ -327,6 +327,7 @@ fn render_outcome(res: &Result<db::QueryResult>, sql: &str) -> Outcome {
                 is_tty: false,
                 echo: None,
                 elapsed: None,
+                null_glyph: "(null)".to_string(),
             },
         )
     };
@@ -549,10 +550,12 @@ fn push_pad(s: &mut String, n: usize) {
 fn buf_cell(c: Option<&db::Cell>) -> String {
     match c {
         None | Some(db::Cell::Null) => "∅".to_string(),
+        Some(db::Cell::Bool(b)) => b.to_string(),
         Some(db::Cell::Int(i)) => i.to_string(),
         Some(db::Cell::Real(f)) => f.to_string(),
         Some(db::Cell::Text(s)) => render::sanitize(s),
         Some(db::Cell::Bytes(b)) => format!("\\x{}", hex_prefix(b)),
+        Some(db::Cell::Json(v)) => render::sanitize(&v.to_string()),
     }
 }
 
@@ -580,8 +583,9 @@ fn truncate_disp(s: &str, w: usize) -> String {
 fn classify(shown: &str, c: Option<&db::Cell>) -> &'static str {
     match c {
         None | Some(db::Cell::Null) => "Comment",
+        Some(db::Cell::Bool(_)) => "Boolean",
         Some(db::Cell::Int(_)) | Some(db::Cell::Real(_)) => "Number",
-        Some(db::Cell::Bytes(_)) => "Special",
+        Some(db::Cell::Bytes(_)) | Some(db::Cell::Json(_)) => "Special",
         Some(db::Cell::Text(_)) => classify_text(shown),
     }
 }
@@ -1585,6 +1589,7 @@ mod tests {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         };
         let r = rt.block_on(async move {
             tokio::task::spawn_blocking(move || db::run(&prof, "select 1", false))
@@ -1602,6 +1607,7 @@ mod tests {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         };
         let sql = "select 7 as answer, null as n";
         let res = db::run(&prof, sql, false);
@@ -1642,6 +1648,7 @@ mod tests {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         };
         let sql = "select 42 as qty, 'widget' as name, '2026-06-10' as day, null as note";
         let res = db::run(&prof, sql, false);
@@ -1694,6 +1701,7 @@ mod tests {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         };
         db::run(&prof, "create table cat(name text, age int)", true).unwrap();
         db::run(&prof, "create table dog(id int, label text)", true).unwrap();

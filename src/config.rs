@@ -71,6 +71,9 @@ pub struct Profile {
     pub readonly: bool,
     #[serde(default)]
     pub no_history: bool,
+    /// SSH destination (`user@bastion`) to tunnel the connection through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<String>,
 }
 
 impl Profile {
@@ -111,6 +114,7 @@ impl Config {
                 prod: false,
                 readonly: false,
                 no_history: false,
+                ssh: None,
             }],
         };
         cfg.save(paths)?;
@@ -159,6 +163,7 @@ mod tests {
             prod: false,
             readonly: false,
             no_history: false,
+            ssh: None,
         }
     }
 

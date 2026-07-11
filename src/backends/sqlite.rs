@@ -1,27 +1,55 @@
-use crate::db::{Cell, QueryResult, ROW_CAP};
+use crate::db::{Cell, QueryResult, RunOpts};
+use crate::sql::{self, Dialect};
 use anyhow::{Context, Result};
 
-pub fn run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
-    use rusqlite::types::ValueRef;
+pub fn connect(target: &str, readonly: bool) -> Result<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
 
     let conn = if target == ":memory:" {
+        // A read-only empty in-memory DB would be useless; the guard's keyword
+        // scan still refuses writes on readonly profiles.
         rusqlite::Connection::open_in_memory()
+    } else if readonly {
+        rusqlite::Connection::open_with_flags(
+            target,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
     } else {
         rusqlite::Connection::open(target)
     }
     .with_context(|| format!("opening sqlite database `{target}`"))?;
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    Ok(conn)
+}
 
-    let trimmed = sql.trim();
-    let mut stmt = conn.prepare(trimmed).context("preparing SQL")?;
+/// Run every statement in `sql_text` (the old code silently dropped anything
+/// after a first row-returning statement). Each statement yields its own
+/// result.
+pub fn run_on(
+    conn: &rusqlite::Connection,
+    sql_text: &str,
+    opts: &RunOpts,
+) -> Result<Vec<QueryResult>> {
+    let mut results = Vec::new();
+    for stmt_text in sql::split_statements(sql_text, Dialect::default()) {
+        results.push(run_one(conn, &stmt_text, opts.cap)?);
+    }
+    Ok(results)
+}
+
+fn run_one(conn: &rusqlite::Connection, stmt_text: &str, cap: usize) -> Result<QueryResult> {
+    use rusqlite::types::ValueRef;
+
+    let mut stmt = conn
+        .prepare(stmt_text)
+        .with_context(|| format!("preparing `{}`", preview(stmt_text)))?;
     let ncol = stmt.column_count();
 
     if ncol == 0 {
-        drop(stmt);
-        conn.execute_batch(trimmed).context("executing SQL")?;
-        return Ok(QueryResult::Affected {
-            changes: conn.changes() as usize,
-        });
+        let changes = stmt
+            .execute([])
+            .with_context(|| format!("executing `{}`", preview(stmt_text)))?;
+        return Ok(QueryResult::Affected { changes });
     }
 
     let columns: Vec<String> = stmt
@@ -30,7 +58,6 @@ pub fn run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
         .map(|s| s.to_string())
         .collect();
 
-    let cap = if all { usize::MAX } else { ROW_CAP };
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut truncated = None;
 
@@ -59,4 +86,9 @@ pub fn run(target: &str, sql: &str, all: bool) -> Result<QueryResult> {
         rows,
         truncated,
     })
+}
+
+fn preview(s: &str) -> String {
+    let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    one.chars().take(60).collect()
 }

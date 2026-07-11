@@ -1,4 +1,5 @@
 mod backends;
+mod cancel;
 mod cli;
 mod config;
 mod creds;
@@ -6,13 +7,20 @@ mod db;
 mod editor;
 #[cfg(feature = "embed-editor")]
 mod embed;
+mod export;
 mod favorites;
 mod history;
+mod introspect;
 mod pager;
+mod params;
 mod recents;
 mod render;
+mod repl;
 mod secrets;
+mod sql;
+mod tunnel;
 mod util;
+mod watch;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -50,6 +58,14 @@ fn real_main() -> Result<()> {
         return run_subcommand(cmd, &paths, &mut cfg, profile_override.as_deref());
     }
 
+    if !cli.params.is_empty() && cli.favorite.is_none() {
+        anyhow::bail!("-P/--param only applies to favorites (-F name)");
+    }
+
+    // `nsql @prod users` — a bare table name with an explicit profile becomes
+    // SELECT * FROM users LIMIT 100.
+    let mut table_shorthand: Option<String> = None;
+
     let profile = if let Some(t) = &target {
         if is_db_url(t) {
             if let Some(pw) = util::url_password(t) {
@@ -65,11 +81,20 @@ fn real_main() -> Result<()> {
                 prod: false,
                 readonly: false,
                 no_history: false,
+                ssh: None,
             }
         } else if let Some(r) = recents::resolve(&paths, t) {
             r.to_profile(&cfg)
         } else if let Some(p) = cfg.profiles.iter().find(|p| &p.name == t).cloned() {
             p
+        } else if profile_override.is_some() && is_bare_table(t) {
+            let quoted = t
+                .split('.')
+                .map(sql::quote_ident)
+                .collect::<Vec<_>>()
+                .join(".");
+            table_shorthand = Some(format!("select * from {quoted} limit 100"));
+            cfg.select(profile_override.as_deref())?
         } else {
             anyhow::bail!(
                 "unknown connection `{t}` — pass a URL, a saved profile (`nsql profiles`), \
@@ -93,46 +118,112 @@ fn real_main() -> Result<()> {
     let scripted = cli.execute.is_some()
         || cli.file.is_some()
         || cli.favorite.is_some()
+        || table_shorthand.is_some()
         || !std::io::stdin().is_terminal();
-    if target.is_some() || !scripted {
+    if (target.is_some() && table_shorthand.is_none()) || !scripted {
         let saved = cfg.profiles.iter().any(|p| p.name == profile.name);
         recents::record(&paths, &profile, saved);
     }
 
+    if cli.repeat {
+        return repl::run(&cli, &paths, &profile);
+    }
+
+    // --last: preseed the scratch buffer with the most recent query and edit it
+    if cli.last {
+        match history::last_for(&paths, &profile.name)? {
+            Some(prev) => {
+                editor::persist_scratch(&paths.scratch_for(&profile.name), &prev)?;
+            }
+            None => anyhow::bail!("no history yet for profile `{}`", profile.name),
+        }
+    }
+
     let out_tty = std::io::stdout().is_terminal();
 
-    let (sql, echo) = match acquire_sql(&cli, &paths, &profile)? {
-        Acquired::Handled => return Ok(()),
-        Acquired::Cancelled => {
-            eprintln!("nsql: cancelled (nothing run)");
-            return Ok(());
+    let (sql_text, echo) = if let Some(shorthand) = table_shorthand {
+        (shorthand, true)
+    } else {
+        match acquire_sql(&cli, &paths, &profile)? {
+            Acquired::Handled => return Ok(()),
+            Acquired::Cancelled => {
+                eprintln!("nsql: cancelled (nothing run)");
+                return Ok(());
+            }
+            Acquired::Run { sql, echo } => (sql, echo),
         }
-        Acquired::Run { sql, echo } => (sql, echo),
     };
 
-    if db::strip_sql_comments(&sql).trim().is_empty() {
+    if db::strip_sql_comments(&sql_text).trim().is_empty() {
         eprintln!("nsql: nothing to run");
         return Ok(());
     }
 
-    db::guard(&profile, &sql, cli.yes, out_tty)?;
+    // History should show the favorite template, not the bound values.
+    let history_text = match &cli.favorite {
+        Some(name) => favorites::load(&paths, name).unwrap_or_else(|_| sql_text.clone()),
+        None => sql_text.clone(),
+    };
+
+    db::guard(&profile, &sql_text, cli.yes, out_tty)?;
+
+    if matches!(db::first_keyword(&sql_text).as_str(), "BEGIN" | "START") {
+        eprintln!(
+            "nsql: note: BEGIN has no effect here — the connection closes after this run \
+             (use --repeat for a session with transactions)"
+        );
+    }
+
+    if let Some(out_path) = &cli.out {
+        let fmt = export::resolve_format(cli.format.as_ref(), out_path)?;
+        let glyph = cli.null.clone().unwrap_or_default();
+        return export::run(&profile, &sql_text, out_path, fmt, &glyph);
+    }
+
+    if let Some(secs) = cli.watch {
+        if cli.execute.is_none() && cli.file.is_none() && cli.favorite.is_none() {
+            anyhow::bail!("--watch needs a scripted query (-e, -f, or -F)");
+        }
+        return watch::run(&profile, &sql_text, secs, &cli, out_tty);
+    }
+
+    let mut conn = db::connect(&profile)?;
+    cancel::reset();
+    let cancel_guard = conn.cancel_closure().map(cancel::arm);
     let started = std::time::Instant::now();
-    let result = db::run(&profile, &sql, cli.all)?;
+    let run_opts = db::RunOpts {
+        cap: if cli.all { usize::MAX } else { db::ROW_CAP },
+        typed: wants_typed(&cli),
+    };
+    let out = db::run_on(&mut conn, &sql_text, &run_opts)?;
     let elapsed = started.elapsed();
+    drop(cancel_guard);
 
     if !profile.no_history {
-        if let Err(e) = history::record(&paths, &profile.name, &sql) {
+        if let Err(e) = history::record(&paths, &profile.name, &history_text) {
             eprintln!("nsql: warning: could not record history: {e:#}");
         }
     }
 
+    for notice in &out.notices {
+        eprintln!("nsql: {notice}");
+    }
+
     let echo_text = if echo && out_tty {
-        Some(sql.clone())
+        Some(sql_text.clone())
     } else {
         None
     };
     let opts = render::Options::from_cli(&cli, out_tty, echo_text, Some(elapsed));
-    render::print(&result, &opts)
+    render::print_all(&out.results, &opts)
+}
+
+fn wants_typed(cli: &Cli) -> bool {
+    cli.json
+        || matches!(
+            cli.format,
+            Some(cli::FormatArg::Json) | Some(cli::FormatArg::Ndjson)
+        )
 }
 
 enum Acquired {
@@ -146,7 +237,7 @@ enum Acquired {
 }
 
 fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> {
-    if cli.edit || cli.embed {
+    if cli.edit || cli.embed || cli.last {
         return compose(paths, profile, cli);
     }
     if let Some(e) = &cli.execute {
@@ -160,10 +251,11 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> 
         return Ok(Acquired::Run { sql, echo: false });
     }
     if let Some(name) = &cli.favorite {
-        return Ok(Acquired::Run {
-            sql: favorites::load(paths, name)?,
-            echo: true,
-        });
+        let template = favorites::load(paths, name)?;
+        let bindings = params::parse_bindings(&cli.params)?;
+        let dialect = sql::Dialect::for_scheme(profile.scheme());
+        let sql = params::substitute(&template, &bindings, cli.unsafe_subst, dialect)?;
+        return Ok(Acquired::Run { sql, echo: true });
     }
     if !std::io::stdin().is_terminal() {
         let mut s = String::new();
@@ -179,8 +271,19 @@ fn acquire_sql(cli: &Cli, paths: &Paths, profile: &Profile) -> Result<Acquired> 
 fn is_db_url(s: &str) -> bool {
     matches!(
         s.split_once("://").map(|(scheme, _)| scheme),
-        Some("postgres" | "postgresql" | "mysql" | "mariadb" | "sqlite")
+        Some("postgres" | "postgresql" | "mysql" | "mariadb" | "sqlite" | "duckdb")
     )
+}
+
+fn is_bare_table(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        && s.chars().filter(|&c| c == '.').count() <= 1
+        && !s.ends_with('.')
 }
 
 fn extract_target(argv: &mut Vec<String>) -> Option<String> {
@@ -193,7 +296,12 @@ fn extract_target(argv: &mut Vec<String>) -> Option<String> {
         "--favorite",
         "-p",
         "--profile",
+        "-P",
+        "--param",
         "--format",
+        "--null",
+        "--out",
+        "--watch",
     ];
     const SUBCOMMANDS: &[&str] = &[
         "profiles",
@@ -201,6 +309,10 @@ fn extract_target(argv: &mut Vec<String>) -> Option<String> {
         "save",
         "favorites",
         "history",
+        "tables",
+        "describe",
+        "schemas",
+        "completions",
         "discover",
         "help",
     ];
@@ -282,6 +394,7 @@ fn run_subcommand(
 ) -> Result<()> {
     match cmd {
         Commands::Profiles => {
+            let color = std::io::stdout().is_terminal();
             if cfg.profiles.is_empty() {
                 println!("(no profiles — add one with `nsql connect <name> --url ...`)");
             }
@@ -293,10 +406,21 @@ fn run_subcommand(
                 };
                 let mut tags = Vec::new();
                 if p.prod {
-                    tags.push("prod");
+                    tags.push(if color {
+                        "\x1b[1;31mprod\x1b[0m".to_string()
+                    } else {
+                        "prod".to_string()
+                    });
                 }
                 if p.readonly {
-                    tags.push("readonly");
+                    tags.push(if color {
+                        "\x1b[32mreadonly\x1b[0m".to_string()
+                    } else {
+                        "readonly".to_string()
+                    });
+                }
+                if p.ssh.is_some() {
+                    tags.push("ssh".to_string());
                 }
                 let tags = if tags.is_empty() {
                     String::new()
@@ -319,6 +443,7 @@ fn run_subcommand(
             set_password,
             prod,
             readonly,
+            ssh,
         } => {
             let existing = cfg.profiles.iter().find(|p| p.name == name).cloned();
             let raw_url = url
@@ -331,6 +456,7 @@ fn run_subcommand(
                 prod: prod || existing.as_ref().map(|p| p.prod).unwrap_or(false),
                 readonly: readonly || existing.as_ref().map(|p| p.readonly).unwrap_or(false),
                 no_history: existing.as_ref().map(|p| p.no_history).unwrap_or(false),
+                ssh: ssh.or_else(|| existing.as_ref().and_then(|p| p.ssh.clone())),
             };
 
             let pw = if set_password {
@@ -384,6 +510,30 @@ fn run_subcommand(
 
         Commands::History { limit } => history::list(paths, limit),
 
+        Commands::Tables { schema } => introspect_command(
+            cfg,
+            paths,
+            profile_override,
+            &introspect::Verb::Tables {
+                schema: schema.as_deref(),
+            },
+        ),
+        Commands::Describe { name } => introspect_command(
+            cfg,
+            paths,
+            profile_override,
+            &introspect::Verb::Describe { name: &name },
+        ),
+        Commands::Schemas => {
+            introspect_command(cfg, paths, profile_override, &introspect::Verb::Schemas)
+        }
+
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "nsql", &mut std::io::stdout());
+            Ok(())
+        }
+
         Commands::Discover => {
             println!(
                 "discovery is Phase 2/3: docker/podman container inspection first, \
@@ -392,6 +542,32 @@ fn run_subcommand(
             Ok(())
         }
     }
+}
+
+fn introspect_command(
+    cfg: &Config,
+    paths: &Paths,
+    profile_override: Option<&str>,
+    verb: &introspect::Verb,
+) -> Result<()> {
+    let profile = match profile_override {
+        Some(_) => cfg.select(profile_override)?,
+        None => match recents::most_recent(paths) {
+            Some(r) => r.to_profile(cfg),
+            None => cfg.select(None)?,
+        },
+    };
+    let q = introspect::query(&profile, verb)?;
+    let out = db::run_all(&profile, &q, &db::RunOpts::new(false))?;
+    let is_tty = std::io::stdout().is_terminal();
+    let opts = render::Options {
+        format: render::Format::Auto,
+        is_tty,
+        echo: None,
+        elapsed: None,
+        null_glyph: "(null)".to_string(),
+    };
+    render::print_all(&out.results, &opts)
 }
 
 #[cfg(test)]
@@ -429,12 +605,16 @@ mod tests {
         assert_eq!(extract_target(&mut a), None);
         let mut b = argv(&["profiles"]);
         assert_eq!(extract_target(&mut b), None);
+        let mut c = argv(&["tables", "--schema", "public"]);
+        assert_eq!(extract_target(&mut c), None);
     }
 
     #[test]
     fn target_after_value_flag() {
         let mut a = argv(&["-p", "x", "sqlite:///t.db"]);
         assert_eq!(extract_target(&mut a).as_deref(), Some("sqlite:///t.db"));
+        let mut b = argv(&["-P", "id=1", "-F", "top", "prod_db"]);
+        assert_eq!(extract_target(&mut b).as_deref(), Some("prod_db"));
     }
 
     #[test]
@@ -444,5 +624,17 @@ mod tests {
             "pyparser_llunde"
         );
         assert_eq!(adhoc_name("postgres://u@h/db?sslmode=require"), "db");
+    }
+
+    #[test]
+    fn bare_table_names() {
+        assert!(is_bare_table("users"));
+        assert!(is_bare_table("public.users"));
+        assert!(is_bare_table("_hidden"));
+        assert!(!is_bare_table("1users"));
+        assert!(!is_bare_table("a.b.c"));
+        assert!(!is_bare_table("users;"));
+        assert!(!is_bare_table("users."));
+        assert!(!is_bare_table(""));
     }
 }
