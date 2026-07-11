@@ -478,10 +478,16 @@ fn run_subcommand(
             };
             if let Some(pw) = pw {
                 match creds::identity(&profile.url).map(|id| creds::identity_key(&id)) {
-                    Some(key) => {
-                        secrets::set(&key, &pw)?;
-                        println!("stored password for `{key}` in the OS keyring");
-                    }
+                    // A missing keyring (headless box, no secret service) must
+                    // not fail `connect` — the profile still works via
+                    // PGPASSWORD/MYSQL_PWD, ~/.pgpass, or a password in the URL.
+                    Some(key) => match secrets::set(&key, &pw) {
+                        Ok(()) => println!("stored password for `{key}` in the OS keyring"),
+                        Err(e) => eprintln!(
+                            "nsql: warning: couldn't store the password in the OS keyring \
+                             ({e:#}) — use PGPASSWORD/MYSQL_PWD or ~/.pgpass instead"
+                        ),
+                    },
                     None => eprintln!("nsql: note: this URL has no host/db to key a secret on"),
                 }
             }

@@ -130,6 +130,15 @@ fn postgres_backend_when_available() {
     let (_o, e, ok) = run(&["connect", "pg", "--url", &url], &[], &home);
     assert!(ok, "connect failed: {e}");
 
+    // CI runners have no OS keyring, so the stored password may not resolve;
+    // feed it via PGPASSWORD like a headless environment would.
+    let pw = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .and_then(|(userinfo, _)| userinfo.split_once(':'))
+        .map(|(_, pw)| pw.to_string())
+        .unwrap_or_default();
+
     let (stdout, stderr, ok) = run(
         &[
             "@pg",
@@ -138,7 +147,7 @@ fn postgres_backend_when_available() {
             "-e",
             "select 7 as answer, null as n, 'x' as s",
         ],
-        &[],
+        &[("PGPASSWORD", &pw)],
         &home,
     );
     assert!(ok, "pg select failed: {stderr}");
