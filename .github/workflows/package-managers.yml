@@ -72,7 +72,7 @@ jobs:
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" \
             "packaging/aur/${{ matrix.pkg }}/PKGBUILD"
       - name: Deploy ${{ matrix.pkg }}
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: ${{ matrix.pkg }}
           pkgbuild: packaging/aur/${{ matrix.pkg }}/PKGBUILD
