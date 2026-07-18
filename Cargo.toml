@@ -56,7 +56,7 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"], op
 # embed-editor feature only:
 nvim-rs = { version = "0.9", features = ["use_tokio"], optional = true }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "process", "net", "sync", "time"], optional = true }
-ratatui = { version = "0.29", features = ["scrolling-regions"], optional = true }
+ratatui = { version = "0.30", features = ["scrolling-regions"], optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [profile.release]
