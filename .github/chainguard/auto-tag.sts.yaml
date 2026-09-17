@@ -1,0 +1,11 @@
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: ^repo:fredrir(@114402558)?/nsql(@1269406277)?:ref:refs/heads/main$
+claim_pattern:
+  repository_id: ^1269406277$
+  repository_owner_id: ^114402558$
+  runner_environment: ^self-hosted$
+  ref: ^refs/heads/main$
+  event_name: ^(push|workflow_dispatch)$
+  job_workflow_ref: ^fredrir/infra/\.github/workflows/rust-auto-tag\.yml@[0-9a-f]{40}$
+permissions:
+  contents: write

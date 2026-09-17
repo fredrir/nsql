@@ -7,44 +7,43 @@ nsql is a small SQL client for **SQLite** and **PostgreSQL**.
 
 ## Install
 
-### Arch Linux (AUR)
+| Platform               | Command                                                          |
+| ---------------------- | ---------------------------------------------------------------- |
+| Any Linux / macOS      | `curl -fsSL https://pkgs.fredrir.com/install.sh \| sh -s -- nsql` |
+| Homebrew (macOS/Linux) | `brew install fredrir/tap/nsql`                                  |
+| Arch Linux (AUR)       | `yay -S nsql` or `yay -S nsql-bin`                               |
+| Nix                    | `nix run github:fredrir/nur-packages#nsql`                       |
+| Cargo                  | `cargo install nsql` or `cargo binstall nsql`                    |
+
+### Debian / Ubuntu
 
 ```sh
-yay -S nsql
-yay -S nsql-bin
-```
-
-### Homebrew (macOS / Linux)
-
-```sh
-brew install fredrir/nsql/nsql
-```
-
-
-### Debian / Ubuntu (apt)
-
-```sh
-curl -fsSL https://fredrir.github.io/nsql/deb/nsql-archive-keyring.asc \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nsql.gpg
-echo "deb [signed-by=/usr/share/keyrings/nsql.gpg] https://fredrir.github.io/nsql/deb stable main" \
-  | sudo tee /etc/apt/sources.list.d/nsql.list
+sudo curl -fsSLo /etc/apt/keyrings/fredrir.asc https://pkgs.fredrir.com/keys/fredrir.asc
+sudo curl -fsSLo /etc/apt/sources.list.d/fredrir.list https://pkgs.fredrir.com/deb/fredrir.list
 sudo apt update && sudo apt install nsql
 ```
 
-### Cargo (crates.io)
+### Fedora / RHEL / openSUSE
 
 ```sh
-cargo install nsql
+sudo curl -fsSLo /etc/yum.repos.d/fredrir.repo https://pkgs.fredrir.com/rpm/fredrir.repo
+sudo dnf install nsql
 ```
-
-### Prebuilt binary (shell installer)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/fredrir/nsql/releases/latest/download/nsql-installer.sh | sh
+sudo zypper addrepo https://pkgs.fredrir.com/rpm/fredrir.repo
+sudo zypper install nsql
 ```
 
-[GitHub Release](https://github.com/fredrir/nsql/releases).
+### Alpine
+
+```sh
+wget -qO /etc/apk/keys/fredrir.rsa.pub https://pkgs.fredrir.com/keys/fredrir.rsa.pub
+echo https://pkgs.fredrir.com/apk >> /etc/apk/repositories
+apk add nsql
+```
+
+[GitHub Releases](https://github.com/fredrir/nsql/releases) carry Linux (glibc 2.28+ and static musl) and macOS archives for x86_64 and aarch64.
 
 ## Quick start
 
