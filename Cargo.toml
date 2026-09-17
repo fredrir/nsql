@@ -29,6 +29,7 @@ keyring-store = ["dep:keyring"]
 # grid into a ratatui inline viewport (never the alternate screen). Opt-in — the
 # default build stays sync and lean; this pulls tokio/ratatui/nvim-rs.
 embed-editor = ["dep:nvim-rs", "dep:tokio", "dep:ratatui", "dep:async-trait"]
+vendored-openssl = ["native-tls/vendored"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -41,7 +42,7 @@ native-tls = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ctrlc = "3"
 clap_complete = "4"
-mysql = { version = "28", optional = true }
+mysql = { version = "28", optional = true, default-features = false, features = ["default-rust"] }
 duckdb = { version = "1", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: JSON output keeps query column order; arbitrary_precision:
@@ -51,7 +52,7 @@ toml = "1"
 directories = "6"
 terminal_size = "0.4"
 rpassword = "7"
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"], optional = true }
+keyring = { version = "4.2", optional = true }
 
 # embed-editor feature only:
 nvim-rs = { version = "0.9", features = ["use_tokio"], optional = true }
@@ -63,28 +64,15 @@ async-trait = { version = "0.1", optional = true }
 strip = true
 lto = "thin"
 
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"
-
-# Debian packaging (cargo-deb). The binary is self-contained (lua assets are
-# embedded via include_str!), so the package only ships the binary + docs.
-# libdbus is a runtime dep of the default keyring-store feature; neovim is the
-# expected-but-optional editor, hence Recommends rather than Depends.
-[package.metadata.deb]
+[package.metadata.release]
 maintainer = "fredrir <fhansteen@gmail.com>"
 section = "database"
-priority = "optional"
-depends = "$auto, libdbus-1-3"
-recommends = "neovim"
-license-file = ["LICENSE", "0"]
-extended-description = """\
-nsql runs SQL from your terminal, composed in your real Neovim, without taking \
-over the screen or destroying scrollback. Supports SQLite, PostgreSQL, and \
-MySQL/MariaDB, with schema-aware completion and OS-keychain credential storage."""
-assets = [
-    ["target/release/nsql", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/nsql/README.md", "644"],
-    ["THIRD-PARTY-LICENSES.md", "usr/share/doc/nsql/THIRD-PARTY-LICENSES.md", "644"],
-]
+features = ["vendored-openssl"]
+extra-files = ["THIRD-PARTY-LICENSES.md"]
+optional = ["neovim: inline/embedded SQL editor (falls back to vim/vi/$EDITOR otherwise)"]
+depends = { arch = ["dbus"] }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
