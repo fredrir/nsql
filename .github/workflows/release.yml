@@ -11,4 +11,4 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    uses: fredrir/infra/.github/workflows/rust-release.yml@c288dcde61a3f3fc398ae93ff703a577f969dfbd
+    uses: fredrir/infra/.github/workflows/rust-release.yml@f44c0e6b90d5e3e1d62a202924b6ab1d0d34ecdd
