@@ -4,13 +4,6 @@
 _2026-09-17_
 
 ### Changed
-- Tag releases automatically through the shared platform
-- Merge pull request #22 from fredrir/ci/auto-tag
-
-## [0.1.14-rc.1]
-_2026-09-17_
-
-### Changed
 - Move CI onto the shared self-hosted Rust platform and drop libdbus
 - Update rustls, rust_decimal and yanked crates past current advisories
 - Merge pull request #18 from fredrir/ci/own-runners
@@ -18,6 +11,8 @@ _2026-09-17_
 - Pin the shared Rust workflows to infra 47f4a2628d91
 - Release tagged versions through the shared platform and drop cargo-dist
 - Merge pull request #21 from fredrir/ci/release-tags
+- Tag releases automatically through the shared platform
+- Merge pull request #22 from fredrir/ci/auto-tag
 
 ## [0.1.13]
 _2026-07-11_

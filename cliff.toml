@@ -10,8 +10,8 @@ header = """
 # The version heading doubles as the GitHub release title (cargo-dist lifts
 # it verbatim), so it stays bare; the date lives on its own line below.
 body = """
-## [{{ version | trim_start_matches(pat="v") }}]
-_{{ timestamp | date(format="%Y-%m-%d") }}_
+{% if version %}## [{{ version | trim_start_matches(pat="v") }}]
+_{{ timestamp | date(format="%Y-%m-%d") }}_{% else %}## [Unreleased]{% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 {% for commit in commits %}\
@@ -26,6 +26,7 @@ conventional_commits = false
 filter_unconventional = false
 protect_breaking_commits = false
 tag_pattern = "v[0-9]*"
+ignore_tags = "-"
 commit_preprocessors = [
   { pattern = '^imprvments$', replace = "assorted improvements (see the commit diff)" },
 ]
