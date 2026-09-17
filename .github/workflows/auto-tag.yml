@@ -1,0 +1,18 @@
+name: Tag release
+'on':
+  push:
+    branches:
+    - main
+    paths-ignore:
+    - .github/**
+    - '**.md'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+jobs:
+  tag:
+    uses: fredrir/infra/.github/workflows/rust-auto-tag.yml@47f4a2628d9115a451f3e8444bbabacaa28cbf8e
