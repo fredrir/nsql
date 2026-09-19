@@ -29,7 +29,6 @@ keyring-store = ["dep:keyring"]
 # grid into a ratatui inline viewport (never the alternate screen). Opt-in — the
 # default build stays sync and lean; this pulls tokio/ratatui/nvim-rs.
 embed-editor = ["dep:nvim-rs", "dep:tokio", "dep:ratatui", "dep:async-trait"]
-vendored-openssl = ["native-tls/vendored"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -37,8 +36,9 @@ anyhow = "1"
 comfy-table = "7"
 rusqlite = { version = "0.40", features = ["bundled"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1"] }
-postgres-native-tls = "0.5"
-native-tls = "0.2"
+tokio-postgres-rustls = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ctrlc = "3"
 clap_complete = "4"
@@ -67,7 +67,6 @@ lto = "thin"
 [package.metadata.release]
 maintainer = "fredrir <fhansteen@gmail.com>"
 section = "database"
-features = ["vendored-openssl"]
 extra-files = ["THIRD-PARTY-LICENSES.md"]
 optional = ["neovim: inline/embedded SQL editor (falls back to vim/vi/$EDITOR otherwise)"]
 depends = { arch = ["dbus"] }

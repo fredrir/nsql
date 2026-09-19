@@ -1,19 +1,20 @@
+use super::postgres_tls::build_connector;
 use crate::config::Profile;
 use crate::db::{Cell, QueryResult, RunOpts};
 use crate::sql::{self, Dialect};
 use crate::tunnel::Tunnel;
 use crate::util::{self, url_has_password};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use postgres::config::SslMode;
 use postgres::SimpleQueryMessage;
-use postgres_native_tls::MakeTlsConnector;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 pub struct PgConn {
     pub client: postgres::Client,
     cancel: postgres::CancelToken,
-    connector: MakeTlsConnector,
+    connector: MakeRustlsConnect,
     notices: Arc<Mutex<Vec<String>>>,
     _tunnel: Option<Tunnel>,
 }
@@ -72,38 +73,6 @@ fn extract_ssl_params(url: &str) -> (String, SslParams) {
         format!("{base}?{}", kept.join("&"))
     };
     (clean, SslParams { mode, rootcert })
-}
-
-/// libpq-compatible sslmode semantics:
-///   disable          — no TLS
-///   allow/prefer     — TLS if the server offers it, no verification
-///   require          — TLS mandatory, no verification (libpq behaviour)
-///   verify-ca        — verify the chain, not the hostname
-///   verify-full      — verify chain + hostname
-/// A provided sslrootcert without an explicit mode implies verify-full.
-fn build_connector(mode: &str, rootcert: Option<&str>) -> Result<MakeTlsConnector> {
-    let mut b = native_tls::TlsConnector::builder();
-    match mode {
-        "disable" | "verify-full" => {}
-        "allow" | "prefer" | "require" => {
-            b.danger_accept_invalid_certs(true);
-            b.danger_accept_invalid_hostnames(true);
-        }
-        "verify-ca" => {
-            b.danger_accept_invalid_hostnames(true);
-        }
-        other => bail!("unsupported sslmode `{other}`"),
-    }
-    if let Some(path) = rootcert {
-        let pem = std::fs::read(path).with_context(|| format!("reading sslrootcert {path}"))?;
-        b.add_root_certificate(
-            native_tls::Certificate::from_pem(&pem)
-                .with_context(|| format!("parsing sslrootcert {path}"))?,
-        );
-    }
-    Ok(MakeTlsConnector::new(
-        b.build().context("building TLS connector")?,
-    ))
 }
 
 pub fn connect(profile: &Profile) -> Result<PgConn> {
