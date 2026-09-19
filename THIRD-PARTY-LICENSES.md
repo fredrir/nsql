@@ -1,7 +1,7 @@
 # Third-party license notices
 
 nsql is licensed under [0BSD](LICENSE). Its release binaries statically link
-many permissively licensed Rust crates (MIT/Apache-2.0/BSD), plus one
+many permissively licensed Rust crates (MIT/Apache-2.0/BSD/ISC), plus one
 dependency whose license carries notice obligations:
 
 ## nvim-rs — LGPL-3.0
