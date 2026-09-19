@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   rust:
-    uses: fredrir/infra/.github/workflows/rust-ci.yml@ca94d69c9751fed555f14be14ec341b15e127e38
+    uses: fredrir/infra/.github/workflows/rust-ci.yml@145594b5b2d8a2d124f777e2a7962bbf8c428a3a
     with:
       postgres: true
       postgres-url-env: NSQL_TEST_PG_URL
