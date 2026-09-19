@@ -1,12 +1,5 @@
 name: Tag release
 'on':
-  push:
-    branches:
-    - main
-    paths-ignore:
-    - .github/**
-    - '**.md'
-    - cliff.toml
   workflow_dispatch: {}
 permissions:
   contents: read
@@ -16,4 +9,4 @@ concurrency:
   cancel-in-progress: false
 jobs:
   tag:
-    uses: fredrir/infra/.github/workflows/rust-auto-tag.yml@ca94d69c9751fed555f14be14ec341b15e127e38
+    uses: fredrir/infra/.github/workflows/rust-auto-tag.yml@eb764b837d1fd10cb71fde1963500854aaef5d6c
