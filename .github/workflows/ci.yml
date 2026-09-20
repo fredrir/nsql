@@ -12,5 +12,6 @@ jobs:
   rust:
     uses: fredrir/infra/.github/workflows/rust-ci.yml@b2c97f0c98c09099d19696089e55f1e95bd6ac1d
     with:
+      fast-test-args: '-- --skip embed_drives_real_nvim_and_reads_back --skip embed_captures_highlight_colors --skip run_keymap_round_trips_via_rpcnotify'
       postgres: true
       postgres-url-env: NSQL_TEST_PG_URL
