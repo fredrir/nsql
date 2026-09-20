@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "shared": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo/"
+  ],
+  "ignored": [
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "targets": {
+    "nsql": [
+      "crates/",
+      "src/",
+      "tests/",
+      "benches/"
+    ]
+  }
+}
