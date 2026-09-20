@@ -6,7 +6,7 @@ claim_pattern:
   runner_environment: ^self-hosted$
   ref: ^refs/heads/main$
   event_name: ^(push|workflow_dispatch)$
-  job_workflow_ref: ^fredrir/infra/\.github/workflows/rust-auto-tag\.yml@(b2c97f0c98c09099d19696089e55f1e95bd6ac1d|d9016b2889c88f1ec99bfe9d7262343a759e4b69)$
-  job_workflow_sha: ^(b2c97f0c98c09099d19696089e55f1e95bd6ac1d|d9016b2889c88f1ec99bfe9d7262343a759e4b69)$
+  job_workflow_ref: ^fredrir/infra/\.github/workflows/rust-auto-tag\.yml@(d9016b2889c88f1ec99bfe9d7262343a759e4b69|8937e81304136e9edaf236a8ca59bf971cf2c7dd)$
+  job_workflow_sha: ^(d9016b2889c88f1ec99bfe9d7262343a759e4b69|8937e81304136e9edaf236a8ca59bf971cf2c7dd)$
 permissions:
   contents: write
