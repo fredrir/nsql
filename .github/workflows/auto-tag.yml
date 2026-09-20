@@ -9,4 +9,4 @@ concurrency:
   cancel-in-progress: false
 jobs:
   tag:
-    uses: fredrir/infra/.github/workflows/rust-auto-tag.yml@b2c97f0c98c09099d19696089e55f1e95bd6ac1d
+    uses: fredrir/infra/.github/workflows/rust-auto-tag.yml@0549725e3fe2af85a9c4da8ed9948712efa97890
