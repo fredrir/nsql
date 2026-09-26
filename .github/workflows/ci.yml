@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   rust:
-    uses: fredrir/infra/.github/workflows/rust-ci.yml@36c2709cbba520c695d6c302dfdca68869907fe7
+    uses: fredrir/infra/.github/workflows/rust-ci.yml@28d058b9ebe39c22f64b5fbef9cc2f0de7362ab0
     with:
       build-output-cache: false
       fast-test-args: '-- --skip embed_drives_real_nvim_and_reads_back --skip embed_captures_highlight_colors --skip run_keymap_round_trips_via_rpcnotify'
