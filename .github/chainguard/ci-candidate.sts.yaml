@@ -1,0 +1,12 @@
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: ^repo:fredrir(@114402558)?/infra(@1328085692)?:ref:refs/heads/main$
+claim_pattern:
+  repository_id: ^1328085692$
+  repository_owner_id: ^114402558$
+  ref: ^refs/heads/main$
+  ref_protected: ^true$
+  runner_environment: ^github-hosted$
+  event_name: ^(push|workflow_dispatch)$
+  job_workflow_ref: ^fredrir/infra/\.github/workflows/ci-candidate\.yml@refs/heads/main$
+permissions:
+  contents: read
